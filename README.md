@@ -12,7 +12,13 @@ custo-benefício — ajudando a escapar da *reduflação*.
     **nº de unidades** (conta os ovos da bandeja se não estiver escrito). Ative em ⚙️
     com uma chave da API Anthropic (console.anthropic.com). A chave fica só no celular
     e não entra no backup. Custo aproximado: poucos centavos por produto.
-  - **OCR offline** (Tesseract.js) — usado sem chave; funciona sem internet, mas erra mais.
+  - **OCR offline** (Tesseract.js) — usado sem chave, funciona sem internet e não
+    custa nada. O texto do OCR passa por um parser feito para etiqueta de
+    prateleira brasileira: separa o **preço do pacote** do preço por kg/L/m
+    (pela altura da linha), entende `12x350ml`, `6 x 1 L`, `C/8`, `BANDEJA C/ 30`,
+    `dúzia`, expande abreviações (`PAP HIG FT 20M` → "Papel higiênico folha
+    tripla"), lê promoções `a partir de N un` e `leve 3 pague 2`, e confere o
+    preço escolhido contra o preço por unidade impresso na etiqueta.
   - Campos preenchidos automaticamente ficam em amarelo. O que você digitar nunca é
     sobrescrito; fotos novas corrigem o que foi lido antes. **🧹 Novo produto** limpa tudo.
 - 🧮 **Preço unitário instantâneo** enquanto você digita:
@@ -53,6 +59,16 @@ python -m http.server 8080
 ```
 
 Abra http://localhost:8080 (use o modo celular do DevTools).
+
+Os testes do parser de etiqueta rodam sem navegador:
+
+```bash
+node test/parser.test.mjs
+```
+
+São 14 etiquetas de supermercado em `test/etiquetas.json`, cada uma com as
+linhas e as alturas que o OCR devolveria. Ao mexer no `parseLabel`, rode isso
+antes de publicar — e acrescente a etiqueta que errou como novo caso.
 
 ## Publicar e instalar no Android
 

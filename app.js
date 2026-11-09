@@ -937,84 +937,230 @@ async function readWithOcr(img) {
   }
 }
 
+/* =========================================================
+   PARSER DE ETIQUETA (usado pelo OCR offline)
+   Etiqueta de prateleira brasileira tem quase sempre:
+     - o nome do produto abreviado, em cima;
+     - o preco do pacote em corpo grande;
+     - o preco por kg/L/m/un em corpo pequeno (NUNCA e o preco a usar);
+     - as vezes uma promocao "a partir de N un" / "leve 3".
+   O parser usa a ALTURA das linhas para separar o preco grande do pequeno.
+   ========================================================= */
+
+/** Trechos que indicam preco por unidade de medida, e nao o preco do pacote. */
+const RE_PRECO_UNITARIO = /(pre[cç]o\s*(por|do|da)\b|\bpor\s*(kg|quilo|quilograma|litro|lt?\b|metro|mt?\b|unidade|unid|un\b|pe[cç]a)|\bo\s*(kg|quilo|litro|metro)\b|\ba\s*unidade\b|\bcada\s*(kg|quilo|litro|metro|100)|\b100\s*(g|gr|ml)\b|\/\s*(kg|quilo|lt?|litro|mt?|metro|un|unid|pe[cç]a)\b)/i;
+/** Linhas que nunca contem o preco do pacote. */
+const RE_LIXO = /\b(c[oó]d(igo)?|sku|ref|refer[eê]ncia|validade|val\b|ean|barras|origem|lote)\b/i;
+/** Promocao por quantidade minima. */
+const RE_PROMO_MIN = /(?:a\s*partir\s*de|acima\s*de|na\s*compra\s*de|levando)\s*(\d{1,2})\s*(?:un|unid\w*|pe[cç]as?|cx|caixas?)?/i;
+const RE_LEVE_PAGUE = /leve\s*(\d{1,2})\s*(?:e\s*)?pague\s*(\d{1,2})/i;
+
+/** Abreviacoes de etiqueta -> texto legivel. Ordem importa. */
+const ABREVS = [
+  [/\bpap(el)?\s*hig(i[eê]n\w*)?\b/gi, 'Papel higiênico'],
+  [/\bpap(el)?\s*toa?l?h?a?\b/gi, 'Papel toalha'],
+  [/\bf(ol)?h(a)?\s*dupla\b|\bfd\b/gi, 'folha dupla'],
+  [/\bf(ol)?h(a)?\s*tripla\b|\bft\b/gi, 'folha tripla'],
+  [/\bf(ol)?h(a)?\s*simples\b|\bfs\b/gi, 'folha simples'],
+  [/\brefrig(erante)?\b/gi, 'Refrigerante'],
+  [/\bachoc(olatado)?\b/gi, 'Achocolatado'],
+  [/\bdeterg(ente)?\b/gi, 'Detergente'],
+  [/\bamac(iante)?\b/gi, 'Amaciante'],
+  [/\bsab(ao|ão)\s*(em\s*)?p[oó]\b/gi, 'Sabão em pó'],
+  [/\bcond(icionador)?\b/gi, 'Condicionador'],
+  [/\bint(egral)?\b(?=\s|$)/gi, 'integral'],
+  [/\bdesn(atado)?\b/gi, 'desnatado'],
+  [/\bc\/\s*(\d)/gi, 'com $1'],
+];
+
+/** Tipos genericos reconhecidos pelo texto da etiqueta, para agrupar no ranking. */
+const TIPOS = [
+  [/papel\s*hig/i, 'Papel higiênico'], [/papel\s*toalha/i, 'Papel toalha'],
+  [/guardanapo/i, 'Guardanapo'], [/alum[ií]nio/i, 'Papel alumínio'],
+  [/\bovos?\b/i, 'Ovos'], [/\barroz\b/i, 'Arroz'], [/\bfeij[ãa]o\b/i, 'Feijão'],
+  [/\bcaf[eé]\b/i, 'Café'], [/\bleite\b/i, 'Leite'], [/refrigerante|\brefrig\b/i, 'Refrigerante'],
+  [/\bcerveja\b/i, 'Cerveja'], [/\b[aá]gua\b/i, 'Água'], [/\bsuco\b/i, 'Suco'],
+  [/\bfralda/i, 'Fraldas'], [/\bsabonete\b/i, 'Sabonete'], [/detergente/i, 'Detergente'],
+  [/\b[oó]leo\b/i, 'Óleo'], [/\ba[cç][uú]car\b/i, 'Açúcar'], [/\bmacarr[ãa]o\b/i, 'Macarrão'],
+  [/\bmanteiga\b/i, 'Manteiga'], [/\bqueijo\b/i, 'Queijo'], [/\bfarinha\b/i, 'Farinha'],
+];
+
+/** Corrige confusoes classicas do OCR em numeros (O/0, l/1, S/5). */
+function limpaNum(t) {
+  return t.replace(/(?<=\d)[Oo]+/g, m => '0'.repeat(m.length))   // 5OOg -> 500g
+          .replace(/[Oo]+(?=\d)/g, m => '0'.repeat(m.length))
+          .replace(/(?<=\d)[lI](?=\d)/g, '1')
+          .replace(/(?<=\d)[Ss](?=\d)/g, '5');
+}
+
 /** Linha com cara de texto de verdade (não lixo do OCR). */
 function looksLikeWords(l) {
   const words = l.split(/\s+/).filter(Boolean);
   const letters = (l.match(/\p{L}/gu) || []).length;
-  return l.length >= 5 && letters / l.replace(/\s/g, '').length >= 0.7
-    && words.some(w => w.replace(/[^\p{L}]/gu, '').length >= 4)
+  return l.length >= 5 && letters / Math.max(1, l.replace(/\s/g, '').length) >= 0.6
+    && words.some(w => w.replace(/[^\p{L}]/gu, '').length >= 3)
     && words.filter(w => w.length <= 2).length <= words.length / 2;
+}
+
+/** Todos os valores monetarios de um texto, com a posicao em que aparecem. */
+function achaValores(txt) {
+  const re = /(R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2}|\d{1,4},\d{2}|\d{1,4}\.\d{2})(?!\d)/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(txt))) {
+    const depois = txt.slice(m.index + m[0].length, m.index + m[0].length + 12);
+    // "500,00 ml" nao e preco, e quantidade
+    if (/^\s*(kg|g|gr|ml|l|lt|m|mts?|un)\b/i.test(depois)) continue;
+    out.push({ valor: num(m[2]), temCifrao: !!m[1], idx: m.index, depois });
+  }
+  return out;
 }
 
 /** Extrai preço, quantidades e categoria do texto do OCR. */
 function parseLabel(raw, lines = []) {
   const out = {};
-  const flat = raw.replace(/\s+/g, ' ');
-  const low = flat.toLowerCase();
-  const maxH = Math.max(1, ...lines.map(l => l.h));
-  const heightOf = s => Math.max(0, ...lines.filter(l => l.text.includes(s)).map(l => l.h));
+  const flat = limpaNum(raw.replace(/\s+/g, ' '));
 
-  // Preço: o maior número "R$ xx,xx" da etiqueta que não seja preço por kg/L/m
-  const re = /(R\s?\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2}|\d{1,4}\.\d{2})(?!\d)/gi;
-  let m, bestScore = -1;
-  while ((m = re.exec(flat))) {
-    const before = low.slice(Math.max(0, m.index - 16), m.index);
-    const after = low.slice(m.index + m[0].length, m.index + m[0].length + 8);
-    if (/^\s*(kg|g|gr|ml|l|lt|m|mts?)\b/.test(after)) continue;   // é quantidade, não preço
-    const isUnitPrice = /(kg|\/\s?l|litro|por|unit|\/\s?m\b|metro|100\s?g|100\s?ml)/.test(before)
-      || /^\s*\/\s*(kg|l|m|un|100)/.test(after);
-    const score = (m[1] ? 2 : 0) + (isUnitPrice ? 0 : 3) + (heightOf(m[2]) / maxH) * 4;
-    if (score > bestScore) { bestScore = score; out.price = num(m[2]); }
+  // Normaliza as linhas: usa as do Tesseract (com altura) ou quebra o texto.
+  // Versao com as abreviacoes expandidas: "PAP HIG" precisa virar "Papel higienico"
+  // ANTES de decidir a categoria, senao a etiqueta abreviada cai na regra errada.
+  let flatExp = flat;
+  for (const [re, sub] of ABREVS) flatExp = flatExp.replace(re, sub);
+
+  const ls = (lines.length ? lines : raw.split('\n').map(text => ({ text, conf: 100, h: 0 })))
+    .map(l => ({ ...l, text: limpaNum((l.text || '').trim()) }))
+    .filter(l => l.text);
+  const maxH = Math.max(1, ...ls.map(l => l.h || 0));
+
+  /* ---------- preço do pacote ---------- */
+  // Cada valor monetario recebe uma nota. O preco por kg/L/m perde pontos;
+  // o corpo grande ganha. Assim "R$ 89,90 o kg" nao vence "R$ 107,88".
+  let melhor = null;
+  const promoCands = [];
+  for (const l of ls) {
+    const ehUnitario = RE_PRECO_UNITARIO.test(l.text);
+    const ehLixo = RE_LIXO.test(l.text);
+    const minProm = l.text.match(RE_PROMO_MIN) || l.text.match(RE_LEVE_PAGUE);
+    const alt = (l.h || 0) / maxH;
+    for (const v of achaValores(l.text)) {
+      if (RE_PRECO_UNITARIO.test(v.depois)) continue;           // "12,99 / kg"
+      let nota = 4 + (v.temCifrao ? 2 : 0) + alt * 6;
+      if (ehUnitario) nota -= 11;
+      if (ehLixo) nota -= 8;
+      if (v.valor < 0.2) nota -= 3;                              // preco de pacote raramente < R$0,20
+      const cand = { ...v, nota, linha: l.text, alt };
+      if (minProm || /\bcada\b|\bpromo|\boferta\b|\bclube\b|\bapp\b/i.test(l.text)) {
+        promoCands.push(cand);
+        nota -= 5;                                               // preco promocional nao e o preco normal
+        cand.nota = nota;
+      }
+      if (!melhor || nota > melhor.nota) melhor = cand;
+    }
   }
+  if (melhor) out.price = melhor.valor;
 
-  const multi = flat.match(/(\d{1,2})\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(kg|g|gr|ml|l|lt)\b/i);
-  const weight = flat.match(/(\d+(?:[.,]\d+)?)\s*(kg|quilos?|g|gr|gramas)\b/i);
-  const volume = flat.match(/(\d+(?:[.,]\d+)?)\s*(ml|l|lt|litros?)\b/i);
-  const rolls = flat.match(/(\d{1,3})\s*(rolos?|rls?)\b/i);
-  const meters = flat.match(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(m|mts?|metros?)\b/i);
-  const units = flat.match(/(\d{1,3})\s*(unidades|unid\.?|un|und|ovos)\b/i);
-  const eggs = /\bovos?\b/i.test(flat);
-  const dozen = /meia\s*d[uú]zia/i.test(flat) ? 6 : /d[uú]zia/i.test(flat) ? 12 : 0;
+  /* ---------- promoção ---------- */
+  const mMin = flat.match(RE_PROMO_MIN);
+  const mLeve = flat.match(RE_LEVE_PAGUE);
+  const promoVal = promoCands.filter(c => c !== melhor).sort((a, b) => b.alt - a.alt)[0];
+  if (mLeve) {
+    out.promo = { price: promoVal ? promoVal.valor : (out.price * (+mLeve[2] / +mLeve[1])), minQty: +mLeve[1] };
+  } else if (mMin && promoVal) {
+    out.promo = { price: promoVal.valor, minQty: +mMin[1] || 1 };
+  }
+  if (out.promo && !(out.promo.price > 0)) delete out.promo;
 
-  const isPaper = /papel|rolo|toalha|guardanapo|alum[ií]nio|pvc/i.test(flat) || rolls;
-  if (eggs || (dozen && !weight && !volume)) {
+  /* ---------- quantidades ---------- */
+  const mult = flat.match(/(\d{1,2})\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(kg|g|gr|ml|l|lt)\b/i)
+    || flat.match(/(\d+(?:[.,]\d+)?)\s*(kg|g|gr|ml|l|lt)\b\s*[x×]\s*(\d{1,2})\b/i);
+  const multInv = mult && /^\d+(?:[.,]\d+)?$/.test(mult[1]) && /^(kg|g|gr|ml|l|lt)$/i.test(mult[2]);
+  const peso = flat.match(/(\d+(?:[.,]\d+)?)\s*(kg|quilos?|kgs|g|gr|gramas?)\b/i);
+  const volume = flat.match(/(\d+(?:[.,]\d+)?)\s*(ml|mls|l|lt|litros?)\b/i);
+  // "rl?s?" aceitaria um "r" solto e casava com o R de "R$" (19,90 R$ -> 90 rolos).
+  const rolos = flat.match(/(\d{1,3})\s*(rolos?|rls?)\b(?!\s*\$)/i)
+    || flat.match(/\bc\/\s*(\d{1,3})\b/i) || flat.match(/\bcom\s*(\d{1,3})\s*rolos?\b/i);
+  const metros = flat.match(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(m|mts?|metros?)\b(?!\s*[ĺl])/i);
+  const unids = flat.match(/(\d{1,3})\s*(unidades?|unid\.?|un\b|und\b|ovos|pe[cç]as?|fraldas?|toalhas?|c[aá]psulas?|saches?|sach[eê]s?)\b/i)
+    || flat.match(/\b(?:c\/|com|contendo|bandeja\s*c?\/?)\s*(\d{1,3})\s*(?:unidades?|unid|un\b|ovos)?/i);
+  const ovos = /\bovos?\b/i.test(flatExp);
+  const duzia = /meia\s*d[uú]zia/i.test(flat) ? 6 : /d[uú]zia/i.test(flat) ? 12 : 0;
+  const ehPapel = /papel|rolo|toalha|guardanapo|alum[ií]nio|pvc|filme/i.test(flatExp);
+
+  if (ovos || (duzia && !peso && !volume)) {
     out.category = 'unidade';
-    out.type = 'Ovos';
-    out.count = units ? num(units[1]) : dozen || undefined;
-  } else if (isPaper && (rolls || meters)) {
+    out.count = unids ? num(unids[1]) : duzia || undefined;
+  } else if (ehPapel && (rolos || metros)) {
     out.category = 'papel';
-    if (rolls) out.rolls = num(rolls[1]);
-    else if (units) out.rolls = num(units[1]);
-    if (meters) out.metersPerRoll = num(meters[1]);
-    out.type = /toalha/i.test(flat) ? 'Papel toalha' : /higi/i.test(flat) ? 'Papel higiênico' : undefined;
-  } else if (multi && /ml|l|lt/i.test(multi[3])) {
-    out.category = 'liquido'; out.packs = num(multi[1]); out.qty = num(multi[2]); out.unit = /ml/i.test(multi[3]) ? 'ml' : 'L';
-  } else if (multi) {
-    out.category = 'peso'; out.packs = num(multi[1]); out.qty = num(multi[2]); out.unit = /kg/i.test(multi[3]) ? 'kg' : 'g';
+    if (rolos) out.rolls = num(rolos[1]);
+    else if (unids && !/toalhas?/i.test(unids[2] || '')) out.rolls = num(unids[1]);
+    if (metros) out.metersPerRoll = num(metros[1]);
+  } else if (mult) {
+    const packs = num(multInv ? mult[3] : mult[1]);
+    const qty = num(multInv ? mult[1] : mult[2]);
+    const un = (multInv ? mult[2] : mult[3]).toLowerCase();
+    const liquido = /^(ml|l|lt)$/.test(un);
+    out.category = liquido ? 'liquido' : 'peso';
+    out.packs = packs;
+    out.qty = qty;
+    out.unit = liquido ? (un === 'ml' ? 'ml' : 'L') : (un === 'kg' ? 'kg' : 'g');
   } else if (volume) {
-    out.category = 'liquido'; out.qty = num(volume[1]); out.unit = /ml/i.test(volume[2]) ? 'ml' : 'L';
-  } else if (weight) {
-    out.category = 'peso'; out.qty = num(weight[1]); out.unit = /^(kg|quilo)/i.test(weight[2]) ? 'kg' : 'g';
-  } else if (units) {
-    out.category = 'unidade'; out.count = num(units[1]);
+    out.category = 'liquido';
+    out.qty = num(volume[1]);
+    out.unit = /^ml/i.test(volume[2]) ? 'ml' : 'L';
+  } else if (peso) {
+    out.category = 'peso';
+    out.qty = num(peso[1]);
+    out.unit = /^(kg|quilo)/i.test(peso[2]) ? 'kg' : 'g';
+  } else if (unids) {
+    out.category = 'unidade';
+    out.count = num(unids[1]);
   }
 
-  // Marca: procura marcas já conhecidas no histórico
-  const brands = [...new Set(state.entries.map(e => e.brand).filter(b => b && b.length > 1))];
-  const nflat = norm(flat);
-  out.brand = brands.find(b => new RegExp(`\\b${norm(b).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(nflat));
+  /* ---------- confere o preço contra o preço por unidade impresso ----------
+     Se a etiqueta diz "R$ 5,18 o kg" e o pacote tem 5 kg, o preco tem de ficar
+     perto de R$ 25,90. Se o candidato escolhido estiver muito longe disso,
+     troca por outro candidato que feche a conta. */
+  const mUnit = flat.match(/(R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2})\s*(?:\/|\bo\b|\bpor\b|\ba\b|\bcada\b)?\s*(kg|quilo|litro|lt?\b|metro|mt?\b|unidade|un\b)/i);
+  if (mUnit && out.category) {
+    const base = baseQty({
+      category: out.category, rolls: out.rolls, metersPerRoll: out.metersPerRoll,
+      qty: out.qty, unit: out.unit, packs: out.packs || 1, count: out.count,
+    });
+    const esperado = num(mUnit[2]) * base;
+    if (Number.isFinite(esperado) && esperado > 0) {
+      const todos = ls.flatMap(l => achaValores(l.text).map(v => v.valor));
+      const perto = todos.filter(v => Math.abs(v / esperado - 1) <= 0.12)
+        .sort((a, b) => Math.abs(a - esperado) - Math.abs(b - esperado))[0];
+      if (perto && (!(out.price > 0) || Math.abs(out.price / esperado - 1) > 0.25)) out.price = perto;
+    }
+  }
 
-  // Nome: só linhas lidas com confiança e com cara de palavras (melhor vazio que lixo)
-  const candidates = (lines.length ? lines : raw.split('\n').map(text => ({ text, conf: 100 })))
-    .filter(l => (l.conf ?? 100) >= 65)
-    .map(l => l.text.replace(/[^\p{L}\d\s.,%-]/gu, '').trim())
-    .filter(l => looksLikeWords(l) && !/R\s?\$|\d+,\d{2}|pre[cç]o|oferta|c[oó]d|validade|a partir/i.test(l));
-  if (candidates[0]) out.name = candidates[0].toLowerCase().replace(/(^|\s)\p{L}/gu, s => s.toUpperCase());
+  /* ---------- tipo, marca e nome ---------- */
+  out.type = (TIPOS.find(([re]) => re.test(flatExp)) || [])[1];
+  if (out.category === 'unidade' && ovos) out.type = 'Ovos';
+
+  const marcas = [...new Set(state.entries.map(e => e.brand).filter(b => b && b.length > 1))];
+  const nflat = norm(flat);
+  out.brand = marcas.find(b => new RegExp(`\\b${norm(b).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(nflat));
+
+  // Nome: a linha de texto mais alta que nao seja preco nem lixo.
+  const cands = ls
+    .filter(l => (l.conf ?? 100) >= 60 && !RE_LIXO.test(l.text) && !RE_PRECO_UNITARIO.test(l.text))
+    .map(l => ({ h: l.h || 0, t: l.text.replace(/[^\p{L}\d\s.,%\/-]/gu, ' ').replace(/\s+/g, ' ').trim() }))
+    .filter(l => looksLikeWords(l.t) && !/R\s?\$|\d+,\d{2}|pre[cç]o|oferta|promo|a partir|leve\s*\d/i.test(l.t));
+  if (cands[0]) {
+    let nome = cands[0].t;
+    for (const [re, sub] of ABREVS) nome = nome.replace(re, sub);
+    nome = nome.toLowerCase().replace(/\s+/g, ' ').trim()
+      .replace(/(^|\s)\p{L}/gu, s => s.toUpperCase());
+    out.name = nome;
+  }
   return out;
 }
 
 let pendingCat = null;   // leitura de outra categoria aguardando confirmacao
 
+/** Aviso "a leitura indica outra categoria" acima do formulario. */
 function renderCatConflict() {
   const b = $('#cat-conflict');
   if (!b) return;

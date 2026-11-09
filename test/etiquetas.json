@@ -1,0 +1,57 @@
+[
+ {"nome":"papel higiênico 12 rolos, preço grande + preço por metro",
+  "linhas":[["PAPEL HIG NEVE FOLHA DUPLA",22],["12 ROLOS 30M",20],["R$ 24,90",58],["R$ 0,07 o metro",12],["Cód 418293",10]],
+  "esperado":{"category":"papel","price":24.90,"rolls":12,"metersPerRoll":30,"type":"Papel higiênico"}},
+
+ {"nome":"abreviação pesada de etiqueta",
+  "linhas":[["PAP HIG MIL FT 20M C/8",20],["19,90",54],["R$ 0,12 /m",11]],
+  "esperado":{"category":"papel","price":19.90,"rolls":8,"metersPerRoll":20}},
+
+ {"nome":"promoção a partir de 2 unidades",
+  "linhas":[["ARROZ TIO JOAO TIPO 1",20],["5KG",18],["R$ 28,90",40],["A PARTIR DE 2 UN",16],["R$ 25,90 CADA",44],["R$ 5,18 o kg",10]],
+  "esperado":{"category":"peso","price":28.90,"qty":5,"unit":"kg","promo":{"price":25.90,"minQty":2}}},
+
+ {"nome":"refrigerante pack 12x350ml",
+  "linhas":[["REFRIGERANTE COLA LATA",20],["PACK 12X350ML",18],["R$ 32,99",56],["R$ 7,85 o litro",11]],
+  "esperado":{"category":"liquido","price":32.99,"qty":350,"unit":"ml","packs":12}},
+
+ {"nome":"leite 6 x 1L",
+  "linhas":[["LEITE INTEGRAL ITALAC",20],["CAIXA 6 X 1 L",18],["R$ 29,40",52],["4,90 por litro",11]],
+  "esperado":{"category":"liquido","price":29.40,"qty":1,"unit":"L","packs":6}},
+
+ {"nome":"ovos bandeja 30",
+  "linhas":[["OVOS BRANCOS GRANDES",20],["BANDEJA C/ 30 UNIDADES",18],["R$ 22,90",54],["R$ 0,76 a unidade",10]],
+  "esperado":{"category":"unidade","price":22.90,"count":30,"type":"Ovos"}},
+
+ {"nome":"ovos dúzia sem número",
+  "linhas":[["OVOS CAIPIRA DUZIA",20],["R$ 14,90",50]],
+  "esperado":{"category":"unidade","price":14.90,"count":12,"type":"Ovos"}},
+
+ {"nome":"café 500g com ruído de OCR",
+  "linhas":[["CAFE TORRADO E MOIDO PILAO",20],["5OOg",18],["R$ 18,49",52],["R$ 36,98 o kg",11],["|||| ||| |||| 789",8]],
+  "esperado":{"category":"peso","price":18.49,"unit":"g"}},
+
+ {"nome":"preço por kg maior que o preço total (açougue)",
+  "linhas":[["PICANHA BOVINA RESFRIADA",20],["R$ 89,90 o kg",40],["PECA 1,2 KG",16],["R$ 107,88",54]],
+  "esperado":{"category":"peso","price":107.88,"qty":1.2,"unit":"kg"}},
+
+ {"nome":"detergente 500ml simples",
+  "linhas":[["DETERGENTE YPE NEUTRO 500ML",20],["R$ 2,49",50]],
+  "esperado":{"category":"liquido","price":2.49,"qty":500,"unit":"ml"}},
+
+ {"nome":"leve 3 pague 2",
+  "linhas":[["SABONETE DOVE 90G",20],["R$ 4,99",48],["LEVE 3 PAGUE 2",16]],
+  "esperado":{"category":"peso","price":4.99,"qty":90,"unit":"g","promo":{"minQty":3}}},
+
+ {"nome":"papel toalha",
+  "linhas":[["PAPEL TOALHA SCOTT",20],["2 ROLOS 60 TOALHAS",18],["R$ 12,99",50]],
+  "esperado":{"category":"papel","price":12.99,"rolls":2,"type":"Papel toalha"}},
+
+ {"nome":"preço sem R$ e com milhar",
+  "linhas":[["TV SMART 50",20],["1.899,00",56]],
+  "esperado":{"price":1899.00}},
+
+ {"nome":"fralda unidades",
+  "linhas":[["FRALDA PAMPERS SOFT M",20],["PACOTE COM 48 UNID",18],["R$ 59,90",52],["R$ 1,25 por unidade",10]],
+  "esperado":{"category":"unidade","price":59.90,"count":48}}
+]
