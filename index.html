@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Compare o preço real (por metro, kg, litro ou unidade) dos produtos do supermercado e fuja da reduflação.">
+  <title>Preço Real</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="appbar">
+    <div class="brand">
+      <img src="icons/icon.svg" alt="" width="28" height="28">
+      <h1>Preço Real</h1>
+    </div>
+    <div class="appbar-actions">
+      <button id="btn-install" class="chip chip-solid" hidden>Instalar app</button>
+      <a href="#settings" class="appbar-icon" aria-label="Configurações">⚙️</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ COMPARAR (visita atual) ============ -->
+    <section id="view-compare" class="view" aria-labelledby="t-compare">
+      <div class="visit-bar card">
+        <div>
+          <h2 id="t-compare">Visita atual</h2>
+          <p id="visit-info" class="muted"></p>
+        </div>
+        <button id="btn-new-visit" class="btn btn-ghost btn-sm">Nova visita</button>
+      </div>
+
+      <div class="chips" id="compare-filter" role="tablist" aria-label="Filtrar por categoria"></div>
+
+      <div id="compare-list"></div>
+    </section>
+
+    <!-- ============ ADICIONAR / EDITAR ============ -->
+    <section id="view-add" class="view" aria-labelledby="t-add">
+      <form id="product-form" class="card form" data-category="papel" novalidate autocomplete="off">
+        <div class="form-head">
+          <h2 id="t-add">Adicionar produto</h2>
+          <button type="button" id="btn-cancel-edit" class="btn btn-ghost btn-sm" hidden>Cancelar edição</button>
+        </div>
+
+        <!-- Fotos + leitura automática -->
+        <div class="photo-box">
+          <div class="photo-actions">
+            <label class="btn btn-primary btn-photo">
+              <span aria-hidden="true">📷</span> Fotografar
+              <input type="file" id="in-camera" accept="image/*" capture="environment" hidden>
+            </label>
+            <label class="btn btn-ghost">
+              🖼️ Galeria
+              <input type="file" id="in-gallery" accept="image/*" multiple hidden>
+            </label>
+            <button type="button" id="btn-new-product" class="btn btn-ghost" hidden>🧹 Novo produto</button>
+          </div>
+          <p class="small muted hint">Dica: fotografe a <b>etiqueta da prateleira</b> e, se quiser, a <b>embalagem</b> (onde aparece peso, volume, metros ou nº de unidades). Pode tirar várias fotos do mesmo produto.</p>
+          <div id="photo-thumbs" class="thumbs"></div>
+          <div id="ocr-status" class="ocr-status" hidden>
+            <span id="ocr-msg">Lendo…</span>
+            <progress id="ocr-progress" max="1"></progress>
+          </div>
+          <p id="ai-notes" class="ai-notes" hidden></p>
+          <p id="read-mode" class="small read-mode"></p>
+          <label class="check"><input type="checkbox" id="ocr-auto" checked> Ler a foto automaticamente</label>
+          <details id="ocr-raw" hidden>
+            <summary>Texto reconhecido</summary>
+            <pre id="ocr-text"></pre>
+          </details>
+        </div>
+
+        <!-- Categoria -->
+        <fieldset class="seg" id="cat-seg">
+          <legend>Como comparar?</legend>
+        </fieldset>
+
+        <div class="grid2">
+          <label class="field span2">Nome do produto
+            <input id="f-name" list="dl-names" required placeholder="Ex.: Papel higiênico folha dupla" enterkeyhint="next">
+          </label>
+          <label class="field">Marca
+            <input id="f-brand" list="dl-brands" placeholder="Ex.: Neve" enterkeyhint="next">
+          </label>
+          <label class="field">Tipo (para comparar)
+            <input id="f-type" list="dl-types" placeholder="Ex.: Papel higiênico" enterkeyhint="next">
+          </label>
+          <label class="field">Preço total (R$)
+            <input id="f-price" inputmode="decimal" placeholder="0,00" required enterkeyhint="next">
+          </label>
+          <label class="field">Mercado / loja
+            <input id="f-store" list="dl-stores" placeholder="Opcional" enterkeyhint="done">
+          </label>
+          <button type="button" id="promo-hint" class="promo-hint span2" hidden></button>
+          <button type="button" id="cat-conflict" class="promo-hint span2" hidden></button>
+        </div>
+
+        <!-- Quantidades por categoria -->
+        <div class="qty" data-for="papel">
+          <label class="field">Nº de rolos
+            <input id="f-rolls" inputmode="numeric" placeholder="Ex.: 12">
+          </label>
+          <label class="field">Metros por rolo
+            <input id="f-mpr" inputmode="decimal" placeholder="Ex.: 30">
+          </label>
+        </div>
+        <div class="qty" data-for="peso">
+          <label class="field">Peso
+            <span class="combo">
+              <input id="f-wqty" inputmode="decimal" placeholder="Ex.: 500">
+              <select id="f-wunit" aria-label="Unidade de peso"><option value="g">g</option><option value="kg">kg</option></select>
+            </span>
+          </label>
+          <label class="field">Embalagens no pacote
+            <input id="f-wpacks" inputmode="numeric" placeholder="1">
+          </label>
+        </div>
+        <div class="qty" data-for="liquido">
+          <label class="field">Volume
+            <span class="combo">
+              <input id="f-vqty" inputmode="decimal" placeholder="Ex.: 350">
+              <select id="f-vunit" aria-label="Unidade de volume"><option value="ml">ml</option><option value="L">L</option></select>
+            </span>
+          </label>
+          <label class="field">Embalagens no pacote
+            <input id="f-vpacks" inputmode="numeric" placeholder="1">
+          </label>
+        </div>
+        <div class="qty" data-for="unidade">
+          <label class="field">Quantidade de unidades
+            <input id="f-count" inputmode="numeric" placeholder="Ex.: 30 ovos">
+          </label>
+          <div class="qty-shortcuts">
+            <span class="small muted">Atalhos:</span>
+            <button type="button" class="chip" data-count="6">½ dúzia</button>
+            <button type="button" class="chip" data-count="12">1 dúzia</button>
+            <button type="button" class="chip" data-count="20">20</button>
+            <button type="button" class="chip" data-count="30">30</button>
+          </div>
+        </div>
+
+        <!-- Resultado ao vivo -->
+        <output id="live-result" class="live-result" aria-live="polite"></output>
+
+        <button type="submit" class="btn btn-primary btn-block" id="btn-save">Salvar na visita atual</button>
+      </form>
+
+      <datalist id="dl-names"></datalist>
+      <datalist id="dl-brands"></datalist>
+      <datalist id="dl-types"></datalist>
+      <datalist id="dl-stores"></datalist>
+    </section>
+
+    <!-- ============ HISTÓRICO ============ -->
+    <section id="view-history" class="view" aria-labelledby="t-history">
+      <div class="card">
+        <h2 id="t-history">Meus produtos salvos</h2>
+        <input id="h-search" type="search" class="search" placeholder="Buscar por nome, marca, tipo ou loja…">
+        <div class="chips" id="history-filter" aria-label="Filtrar por categoria"></div>
+        <div class="row-actions">
+          <button id="btn-export" class="btn btn-ghost btn-sm">⬇️ Exportar backup</button>
+          <label class="btn btn-ghost btn-sm">⬆️ Importar
+            <input type="file" id="in-import" accept="application/json,.json" hidden>
+          </label>
+          <button id="btn-clear-old" class="btn btn-ghost btn-sm">🧹 Apagar visitas anteriores</button>
+          <button id="btn-clear-all" class="btn btn-danger btn-sm">🗑️ Apagar tudo</button>
+        </div>
+        <p id="history-count" class="muted small"></p>
+      </div>
+      <div id="history-list"></div>
+    </section>
+
+    <!-- ============ CONFIGURAÇÕES ============ -->
+    <section id="view-settings" class="view" aria-labelledby="t-settings">
+      <div class="card">
+        <h2 id="t-settings">Leitura inteligente das fotos (IA)</h2>
+        <p class="small">
+          Sem IA, o app usa um leitor de texto básico (OCR), que funciona offline mas erra muito em
+          etiquetas reais. Com a IA <b>Claude</b>, o app entende a etiqueta e a embalagem:
+          nome, marca, preço, promoções “a partir de N un”, peso/volume/metros e
+          <b>quantidade de unidades</b> (ex.: conta os ovos da bandeja).
+        </p>
+        <ol class="small steps">
+          <li>Crie uma conta em <b>console.anthropic.com</b> e adicione créditos (cada foto custa poucos centavos).</li>
+          <li>Em <b>API Keys</b>, crie uma chave (de preferência com limite de gasto) e copie.</li>
+          <li>Cole a chave abaixo. Ela fica salva <b>somente neste celular</b> e só é enviada para a Anthropic.</li>
+        </ol>
+        <label class="field">Chave da API Anthropic
+          <input id="s-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+        </label>
+        <div class="row-actions" style="margin-top:10px">
+          <button type="button" id="btn-key-save" class="btn btn-primary btn-sm">Salvar e testar</button>
+          <button type="button" id="btn-key-remove" class="btn btn-danger btn-sm">Remover chave</button>
+        </div>
+        <p id="key-status" class="small" style="margin-top:10px"></p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Navegação">
+    <a href="#compare" data-view="compare" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>
+      <span>Comparar</span>
+    </a>
+    <a href="#add" data-view="add" class="tab tab-add">
+      <span class="plus" aria-hidden="true">+</span>
+      <span>Adicionar</span>
+    </a>
+    <a href="#history" data-view="history" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="9" /></svg>
+      <span>Histórico</span>
+    </a>
+  </nav>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

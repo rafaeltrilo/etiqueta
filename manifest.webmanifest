@@ -1,0 +1,25 @@
+{
+  "id": "./",
+  "name": "Preço Real – Comparador de Supermercado",
+  "short_name": "Preço Real",
+  "description": "Compare o preço real por metro, quilo, litro ou unidade e fuja da reduflação.",
+  "lang": "pt-BR",
+  "start_url": "./?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#0b1f1d",
+  "theme_color": "#0f766e",
+  "categories": ["shopping", "utilities", "finance"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Adicionar produto", "short_name": "Adicionar", "url": "./#add", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Histórico", "url": "./#history", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
