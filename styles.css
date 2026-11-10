@@ -139,16 +139,18 @@ main {
 .form[data-category="papel"] .qty[data-for="papel"],
 .form[data-category="peso"] .qty[data-for="peso"],
 .form[data-category="liquido"] .qty[data-for="liquido"],
+.form[data-category="folha"] .qty[data-for="folha"],
 .form[data-category="unidade"] .qty[data-for="unidade"] { display: grid; }
 
-.seg { border: 0; padding: 0; margin: 4px 0 12px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.seg { border: 0; padding: 0; margin: 4px 0 12px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .seg legend { font-size: .85rem; color: var(--muted); font-weight: 600; margin-bottom: 6px; padding: 0; }
 .seg button {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   padding: 8px 4px; border-radius: 12px; border: 1px solid var(--border);
   background: var(--surface-2); color: var(--text); font: inherit; font-size: .78rem; cursor: pointer;
 }
-.seg button .ico { font-size: 1.3rem; }
+.seg button .ico { font-size: 1.25rem; }
+.seg button small { font-size: .68rem; opacity: .8; }
 .seg button[aria-pressed="true"] { background: var(--primary-soft); border-color: var(--primary); font-weight: 700; }
 
 .photo-box { background: var(--surface-2); border: 1px dashed var(--border); border-radius: 14px; padding: 12px; margin-bottom: 14px; }
@@ -307,5 +309,25 @@ main {
 }
 @media (max-width: 360px) {
   .grid2, .qty { grid-template-columns: 1fr; }
-  .seg { grid-template-columns: repeat(2, 1fr); }
+  .seg { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* Aviso persistente de erro de leitura e de cálculo implausível */
+.read-error {
+  display: flex; gap: 8px; align-items: flex-start; margin-top: 10px;
+  background: var(--danger-soft, #fee2e2); color: var(--danger, #b91c1c);
+  border: 1px solid currentColor; border-radius: 12px; padding: 10px 12px; font-size: .85rem;
+}
+.read-error button {
+  margin-left: auto; background: none; border: 0; color: inherit;
+  font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.sanity {
+  margin-top: 8px; background: var(--warn-soft, #fef3c7); color: #92400e;
+  border: 1px solid var(--warn, #f59e0b); border-radius: 12px; padding: 10px 12px; font-size: .85rem;
+}
+@media (prefers-color-scheme: dark) {
+  .sanity { color: #fde68a; background: #422006; }
+  .read-error { background: #450a0a; color: #fca5a5; }
+}
+.deal { display: block; margin-top: 2px; font-size: .8rem; color: var(--primary); font-weight: 600; }

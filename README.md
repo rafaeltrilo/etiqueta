@@ -21,8 +21,17 @@ custo-benefício — ajudando a escapar da *reduflação*.
     preço escolhido contra o preço por unidade impresso na etiqueta.
   - Campos preenchidos automaticamente ficam em amarelo. O que você digitar nunca é
     sobrescrito; fotos novas corrigem o que foi lido antes. **🧹 Novo produto** limpa tudo.
+- ⚠️ **Checagem de sanidade**: antes de mostrar qualquer resultado, o app confere
+  se o número é possível. "R$ 0,06 para 960 m" (o preço por metro da etiqueta lido
+  como preço do pacote) é recusado com explicação, em vez de virar um
+  "melhor custo-benefício" falso. Produtos reprovados ficam fora do pódio.
+- 🏷️ **Promoção por quantidade**: a etiqueta brasileira tem duas colunas —
+  preço normal à esquerda, "A partir de 3 UN / a UN sai por:" à direita. O app
+  separa as colunas antes de ler (senão o "3 UN" vira a quantidade do produto)
+  e mostra **as duas contas**: o preço por metro comprando 1 e levando N.
 - 🧮 **Preço unitário instantâneo** enquanto você digita:
   - Papel / rolos → R$/m (rolos × metros por rolo)
+  - Papel toalha → R$/100 folhas (é vendido por folha, não por metro)
   - Peso → R$/kg (g ou kg, com nº de embalagens no pacote)
   - Líquido → R$/L (ml ou L, com nº de embalagens)
   - Unidade → R$/un (ovos, fraldas, etc.)
@@ -66,8 +75,11 @@ Os testes do parser de etiqueta rodam sem navegador:
 node test/parser.test.mjs
 ```
 
-São 14 etiquetas de supermercado em `test/etiquetas.json`, cada uma com as
-linhas e as alturas que o OCR devolveria. Ao mexer no `parseLabel`, rode isso
+São 26 etiquetas em `test/etiquetas.json`, cada uma com as linhas e as alturas
+que o OCR devolveria. As 12 marcadas `REAL:` são fotos de prateleira de verdade,
+com os casos que mais derrubam o parser: preço por litro quase 4× o preço do
+produto, promoção impressa em corpo maior que o preço normal, `L32P28`,
+`50F C/2`, e a tarja "A partir de N UN" que não pode virar quantidade. Ao mexer no `parseLabel`, rode isso
 antes de publicar — e acrescente a etiqueta que errou como novo caso.
 
 ## Publicar e instalar no Android

@@ -22,6 +22,7 @@ const CATS = {
   papel:   { label: 'Papel / rolo', short: 'Papel',   unit: 'm',  unitName: 'metro',   icon: '🧻' },
   peso:    { label: 'Peso',         short: 'Peso',    unit: 'kg', unitName: 'quilo',   icon: '⚖️' },
   liquido: { label: 'Líquido',      short: 'Líquido', unit: 'L',  unitName: 'litro',   icon: '🥤' },
+  folha:   { label: 'Folhas',       short: 'Folhas',  unit: '100 fl', unitName: '100 folhas', icon: '🧺' },
   unidade: { label: 'Unidade',      short: 'Unidade', unit: 'un', unitName: 'unidade', icon: '🥚' },
 };
 
@@ -176,18 +177,61 @@ function currentVisit() {
 }
 
 /* ---------- cálculo do preço unitário ---------- */
-/** Quantidade total na unidade padrão (m, kg, L ou un). */
+/** Quantidade total na unidade padrão (m, kg, L, 100 folhas ou un). */
 function baseQty(e) {
   const packs = e.packs > 0 ? e.packs : 1;
   switch (e.category) {
     case 'papel':   return e.rolls * e.metersPerRoll;
     case 'peso':    return e.qty * (e.unit === 'g' ? 0.001 : 1) * packs;
     case 'liquido': return e.qty * (e.unit === 'ml' ? 0.001 : 1) * packs;
+    case 'folha':   return (e.sheets * (e.packs > 0 ? e.packs : 1)) / 100;
     case 'unidade': return e.count;
   }
   return NaN;
 }
 const unitPrice = e => e.price / baseQty(e);
+
+/* ---------- checagem de sanidade ----------
+   Uma leitura errada produz um numero que PARECE uma resposta: "R$ 0,000/m",
+   "o mais barato custa 97% menos". Isso e pior do que nao ler nada, porque leva
+   a comprar o produto errado. Antes de exibir, o app confere se o resultado e
+   possivel e, quando nao for, avisa em vez de montar o ranking. */
+
+/** Faixas plausiveis de preco unitario no mercado brasileiro (R$). */
+const FAIXA = {
+  papel:   [0.01, 2],      // por metro
+  peso:    [0.5, 500],     // por quilo
+  liquido: [0.5, 200],     // por litro
+  folha:   [0.2, 50],      // por 100 folhas
+  unidade: [0.02, 500],    // por unidade
+};
+
+/** Devolve o motivo pelo qual o cálculo não parece confiável, ou null. */
+function sanity(e, peers = []) {
+  const base = baseQty(e);
+  if (!Number.isFinite(base) || base <= 0) return 'Falta a quantidade da embalagem para calcular o preço real.';
+  if (!(e.price > 0)) return 'Falta o preço total.';
+
+  // O erro mais comum: pegar o "Preço por MT/LT/UN" da etiqueta como preço do pacote.
+  if (e.price < 1 && base >= 5) {
+    return `R$ ${money(e.price)} para ${fmtBase(e)}? `
+      + 'Isso parece ser o preço por unidade impresso na etiqueta, não o preço do pacote.';
+  }
+  const up = e.price / base;
+  const [min, max] = FAIXA[e.category] || [0, Infinity];
+  if (up < min) return `${fmtUnit(up, e.category)} é barato demais para ser verdade. Confira o preço e a quantidade.`;
+  if (up > max) return `${fmtUnit(up, e.category)} é caro demais para ser verdade. Confira o preço e a quantidade.`;
+
+  // Muito fora da curva dos outros produtos do mesmo tipo nesta visita.
+  const ups = peers.map(unitPrice).filter(v => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (ups.length >= 2) {
+    const mediana = ups[Math.floor(ups.length / 2)];
+    if (up < mediana / 8 || up > mediana * 8) {
+      return `${fmtUnit(up, e.category)} destoa demais dos outros (${fmtUnit(mediana, e.category)}). Confira os dados.`;
+    }
+  }
+  return null;
+}
 const isEggs = e => /\bovos?\b/.test(norm(`${e.type} ${e.name}`));
 
 function describeQty(e) {
@@ -196,14 +240,23 @@ function describeQty(e) {
     case 'papel': return `${fmtN(e.rolls)} rolo${e.rolls > 1 ? 's' : ''} × ${fmtN(e.metersPerRoll)} m = ${fmtN(baseQty(e))} m`;
     case 'peso':
     case 'liquido': return `${packs}${fmtN(e.qty, 3)} ${e.unit}`;
+    case 'folha': {
+      const n = e.packs > 1 ? `${fmtN(e.packs)} rolos × ` : '';
+      return `${n}${fmtN(e.sheets)} folhas = ${fmtN(e.sheets * (e.packs > 1 ? e.packs : 1))} folhas`;
+    }
     case 'unidade': return `${fmtN(e.count)} un`;
   }
   return '';
 }
-const fmtBase = e => `${fmtN(baseQty(e), 3)} ${CATS[e.category].unit}`;
+/** "960 m", "360 folhas", "1,5 kg": o total da embalagem em texto corrido. */
+function fmtBase(e) {
+  const base = baseQty(e);
+  if (e.category === 'folha') return `${fmtN(base * 100)} folhas`;
+  return `${fmtN(base, 3)} ${CATS[e.category].unit}`;
+}
 
 const productKey = e => [e.category, norm(e.name), norm(e.brand)].join('|');
-const groupLabel = e => (e.type || '').trim() || CATS[e.category].short;
+const groupLabel = e => tipoCanonico((e.type || '').trim()) || CATS[e.category].short;
 const groupKey = e => e.category + '|' + norm(groupLabel(e));
 
 /** Registro anterior do mesmo produto (outra visita). */
@@ -301,30 +354,41 @@ function renderCompare() {
 
 function renderGroup(g) {
   const c = CATS[g.cat];
-  const sorted = g.items.slice().sort((a, b) => unitPrice(a) - unitPrice(b));
-  const best = unitPrice(sorted[0]);
-  const worst = unitPrice(sorted[sorted.length - 1]);
-  const multi = sorted.length > 1;
+  // Itens cujo calculo nao passa na checagem ficam de fora do podio e aparecem
+  // no fim com o aviso: um numero errado nao pode virar "melhor custo-beneficio".
+  const avisos = new Map(g.items.map(e => [e.id, sanity(e, g.items.filter(x => x.id !== e.id))]));
+  const bons = g.items.filter(e => !avisos.get(e.id)).sort((a, b) => unitPrice(a) - unitPrice(b));
+  const ruins = g.items.filter(e => avisos.get(e.id));
+  const sorted = [...bons, ...ruins];
+  const best = bons.length ? unitPrice(bons[0]) : NaN;
+  const worst = bons.length ? unitPrice(bons[bons.length - 1]) : NaN;
+  const multi = bons.length > 1;
 
   const lis = sorted.map((e, i) => {
+    const aviso = avisos.get(e.id);
     const up = unitPrice(e);
     const diff = (up / best - 1) * 100;
-    const isBest = i === 0 && multi;
+    const isBest = i === 0 && multi && !aviso;
     const pic = thumbOf(e);
+    // Preco levando N, quando a etiqueta tinha promocao por quantidade.
+    const deal = !aviso && e.promoPrice > 0
+      ? `<span class="deal">🏷️ levando ${e.promoMinQty > 1 ? e.promoMinQty : 'na promoção'}: ${fmtUnit(e.promoPrice / baseQty(e), e.category)}</span>`
+      : '';
     return `<li class="item ${isBest ? 'best' : ''} ${pic ? 'has-pic' : ''}">
-      <span class="pos">${i + 1}</span>
+      <span class="pos">${aviso ? '⚠️' : i + 1}</span>
       ${pic ? `<img class="pic" src="${pic}" alt="">` : ''}
       <div class="info">
         ${isBest ? '<span class="badge">Melhor custo-benefício</span>' : ''}
         <strong>${esc(e.name)}</strong>
-        <small>${esc(e.brand || 'Sem marca')} · ${describeQty(e)} · ${brl(e.price)}${isEggs(e) ? ` · dúzia ${brl(up * 12)}` : ''}</small>
+        <small>${esc(e.brand || 'Sem marca')} · ${describeQty(e)} · ${brl(e.price)}${isEggs(e) && !aviso ? ` · dúzia ${brl(up * 12)}` : ''}</small>
+        ${deal}
       </div>
       <div class="up">
-        <b>${fmtUnit(up, e.category)}</b>
-        ${multi ? (i === 0 ? '<small>mais barato</small>' : `<small>+${fmtN(diff, 1)}%</small>`) : ''}
+        <b>${aviso ? '—' : fmtUnit(up, e.category)}</b>
+        ${!aviso && multi ? (i === 0 ? '<small>mais barato</small>' : `<small>+${fmtN(diff, 1)}%</small>`) : ''}
       </div>
-      ${multi ? `<div class="bar"><i style="width:${Math.max(6, (up / worst) * 100).toFixed(1)}%"></i></div>` : ''}
-      <div class="extra">${historyNote(e)}</div>
+      ${!aviso && multi ? `<div class="bar"><i style="width:${Math.max(6, (up / worst) * 100).toFixed(1)}%"></i></div>` : ''}
+      <div class="extra">${aviso ? `<div class="sanity">⚠️ ${aviso} <b>Toque em ✏️ para corrigir.</b></div>` : historyNote(e)}</div>
       <div class="tools">
         <button class="icon-btn" data-act="edit" data-id="${e.id}" aria-label="Editar">✏️</button>
         <button class="icon-btn" data-act="del" data-id="${e.id}" aria-label="Remover">🗑️</button>
@@ -334,7 +398,7 @@ function renderGroup(g) {
 
   const saving = multi && worst > best
     ? `<div class="saving">💡 O mais barato custa <b>${fmtN((1 - best / worst) * 100, 1)}% menos</b> por ${c.unitName} que o mais caro.</div>`
-    : (multi ? '' : `<p class="muted small">Adicione outro produto do tipo “${esc(g.label)}” para comparar.</p>`);
+    : (bons.length > 1 || bons.length === 0 ? '' : `<p class="muted small">Adicione outro produto do tipo “${esc(g.label)}” para comparar.</p>`);
 
   return `<section class="card">
     <div class="group-head">
@@ -370,7 +434,7 @@ let promo = null;        // { price, minQty } detectado na etiqueta
 function setCategory(cat) {
   form.dataset.category = cat;
   $$('#cat-seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.cat === cat));
-  F('type').placeholder = { papel: 'Ex.: Papel higiênico', peso: 'Ex.: Arroz', liquido: 'Ex.: Refrigerante', unidade: 'Ex.: Ovos' }[cat];
+  F('type').placeholder = { papel: 'Ex.: Papel higiênico', peso: 'Ex.: Arroz', liquido: 'Ex.: Refrigerante', folha: 'Ex.: Papel toalha', unidade: 'Ex.: Ovos' }[cat];
   updateLive();
 }
 
@@ -404,6 +468,7 @@ function readForm() {
   if (cat === 'papel') { e.rolls = num(F('rolls').value); e.metersPerRoll = num(F('mpr').value); }
   else if (cat === 'peso') { e.qty = num(F('wqty').value); e.unit = F('wunit').value; e.packs = num(F('wpacks').value) || 1; }
   else if (cat === 'liquido') { e.qty = num(F('vqty').value); e.unit = F('vunit').value; e.packs = num(F('vpacks').value) || 1; }
+  else if (cat === 'folha') { e.sheets = num(F('sheets').value); e.packs = num(F('fpacks').value) || 1; }
   else { e.count = num(F('count').value); }
   return e;
 }
@@ -423,6 +488,8 @@ function fillForm(e, { keepPrice = true } = {}) {
   F('vqty').value = e.category === 'liquido' ? fmtN(e.qty, 3) : '';
   F('vunit').value = e.category === 'liquido' ? e.unit : 'ml';
   F('vpacks').value = e.category === 'liquido' && e.packs > 1 ? e.packs : '';
+  F('sheets').value = e.category === 'folha' ? (e.sheets ?? '') : '';
+  F('fpacks').value = e.category === 'folha' && e.packs > 1 ? e.packs : '';
   F('count').value = e.count ?? '';
   updateLive();
 }
@@ -510,7 +577,7 @@ function updateLive() {
   const visit = currentVisit();
   const peers = state.entries.filter(x => x.visitId === visit.id && x.id !== editingId
     && groupKey(x) === groupKey(e));
-  let note = `Total: ${fmtN(base, 3)} ${c.unit} por ${brl(e.price)}`;
+  let note = `Total: ${fmtBase(e)} por ${brl(e.price)}`;   // montado aos poucos abaixo
   if (e.category === 'unidade') note = `${fmtN(base)} unidades por ${brl(e.price)}`
     + (isEggs(e) || base % 12 === 0 ? ` · a dúzia sai ${brl(up * 12)}` : '');
   let isBest = false;
@@ -527,13 +594,21 @@ function updateLive() {
   const prev = previousOf({ ...e, id: editingId, visitId: visit.id, createdAt: Date.now() });
   if (prev) {
     note += `<br>Última vez (${fmtDate(prev.createdAt)}): ${fmtUnit(unitPrice(prev), prev.category)} ${trendHtml(up, unitPrice(prev))}`;
-    if (baseQty(prev) > base * 1.005) note += `<br>⚠️ <b>Reduflação:</b> antes vinha ${fmtBase(prev)}, agora ${fmtN(base, 3)} ${c.unit}.`;
+    if (baseQty(prev) > base * 1.005) note += `<br>⚠️ <b>Reduflação:</b> antes vinha ${fmtBase(prev)}, agora ${fmtBase(e)}.`;
   }
   const label = e.category === 'unidade' && isEggs(e) ? 'Preço por ovo' : `Preço real por ${c.unitName}`;
-  out.innerHTML = `<div class="result-box ${isBest ? 'best' : ''}">
+  // Promoção por quantidade: mostra as duas contas, porque é assim que se decide.
+  if (promo && promo.price > 0 && promo.price !== e.price) {
+    const upp = promo.price / base;
+    note += `<br>🏷️ Levando ${promo.minQty > 1 ? promo.minQty + ' ou mais' : 'na promoção'}: `
+      + `<b>${fmtUnit(upp, e.category)}</b> (${brl(promo.price)} cada, ${fmtN((1 - upp / up) * 100, 1)}% abaixo).`;
+  }
+  const aviso = sanity(e, peers);
+  out.innerHTML = `<div class="result-box ${isBest && !aviso ? 'best' : ''}">
     <div class="muted small">${label}</div>
-    <div class="big">${fmtUnit(up, e.category)}</div>
-    <div class="note">${note}</div></div>`;
+    <div class="big">${aviso ? '⚠️ confira os dados' : fmtUnit(up, e.category)}</div>
+    <div class="note">${aviso ? '' : note}</div></div>`
+    + (aviso ? `<div class="sanity">⚠️ ${aviso}</div>` : '');
 }
 form.addEventListener('input', ev => {
   const el = ev.target;
@@ -568,6 +643,9 @@ form.addEventListener('submit', async ev => {
   if (!(baseQty(e) > 0)) { toast('Informe a quantidade da embalagem'); return; }
 
   const visit = currentVisit();
+  const aviso = sanity(e, state.entries.filter(x => x.visitId === visit.id && x.id !== editingId && groupKey(x) === groupKey(e)));
+  if (aviso && !confirm(`${aviso}\n\nSalvar assim mesmo?`)) return;
+
   const prevStore = state.lastStore;
   if (e.store) state.lastStore = e.store;
 
@@ -589,10 +667,13 @@ form.addEventListener('submit', async ev => {
   let target;
   if (old) {
     target = old;
-    for (const k of ['rolls', 'metersPerRoll', 'qty', 'unit', 'packs', 'count', 'thumb'] ) delete target[k];
+      for (const k of ['rolls', 'metersPerRoll', 'qty', 'unit', 'packs', 'count', 'sheets', 'thumb']) delete target[k];
     Object.assign(target, e, { updatedAt: Date.now(), thumbId });
+    delete target.promoPrice; delete target.promoMinQty;
+    if (promo && promo.price > 0 && promo.price !== e.price) { target.promoPrice = promo.price; target.promoMinQty = promo.minQty || 1; }
   } else {
     target = { ...e, id: uid(), visitId: visit.id, createdAt: Date.now(), thumbId };
+    if (promo && promo.price > 0 && promo.price !== e.price) { target.promoPrice = promo.price; target.promoMinQty = promo.minQty || 1; }
     state.entries.push(target);
   }
 
@@ -719,11 +800,34 @@ for (const id of ['in-camera', 'in-gallery']) {
   });
 }
 
+/** Erro de leitura fica na tela ate ser fechado: o toast some antes de dar para ler. */
+function setReadError(msg) {
+  const box = $('#read-error');
+  if (!box) return;
+  box.hidden = !msg;
+  if (msg) box.innerHTML = `<span>⚠️ ${esc(msg)}</span><button type="button" aria-label="Fechar">×</button>`;
+}
+$('#read-error')?.addEventListener('click', ev => { if (ev.target.tagName === 'BUTTON') setReadError(''); });
+
+/** Le a foto com o OCR offline e preenche o formulario. */
+async function lerComOcr(photo, { motivo = '' } = {}) {
+  photo.status = '🔤';
+  photo.b64 = null;
+  renderThumbs();
+  setBusy(motivo || 'Lendo texto da foto…');
+  const { text, lines } = await readWithOcr(photo.img);
+  photo.status = '✓';
+  $('#ocr-text').textContent = text || '(nenhum texto encontrado)';
+  $('#ocr-raw').hidden = false;
+  const n = applyParsed(parseLabel(text, lines), { keepText: true });
+  return n;
+}
+
 async function processPhoto(photo) {
   if (!photos.includes(photo)) return;          // removida enquanto esperava
   try {
     if (hasAi()) {
-      // A IA lê TODAS as fotos do produto juntas; se há outra foto na fila, deixa para ela.
+      // A IA le TODAS as fotos do produto juntas; se ha outra foto na fila, deixa para ela.
       if (photos[photos.length - 1] !== photo) { photo.status = '…'; renderThumbs(); return; }   // o lote final le todas
       const batch = photos.slice(-MAX_AI_PHOTOS).filter(p => p.img || p.b64);
       if (!batch.length) return;
@@ -734,33 +838,36 @@ async function processPhoto(photo) {
       let data;
       try {
         data = await readWithClaude(batch.map(p => p.b64));
+      } catch (err) {
+        // Plano B: a IA falhou, mas o OCR offline ainda pode preencher alguma coisa.
+        console.warn(err);
+        batch.forEach(p => { p.b64 = null; });
+        setReadError(`${err.message} Usei a leitura básica (OCR) desta vez.`);
+        const n = await lerComOcr(photo, { motivo: 'IA indisponível — lendo com o OCR…' });
+        toast(n ? `OCR preencheu ${n} campo${n > 1 ? 's' : ''} — confira os amarelos` : 'Não consegui ler. Preencha manualmente.', 4000);
+        return;
       } finally {
         batch.forEach(p => { p.b64 = null; p.img = null; });   // libera memoria
       }
       batch.forEach(p => { p.status = '✓'; });
+      setReadError('');
       const n = applyParsed(fromAi(data));
       const notes = (data.notes || '').trim();
       $('#ai-notes').hidden = !notes;
       $('#ai-notes').textContent = notes ? '🤖 ' + notes : '';
       toast(n ? `IA preencheu ${n} campo${n > 1 ? 's' : ''} — confira os amarelos` : 'A IA não encontrou dados novos nesta foto', 3500);
     } else {
-      photo.status = '🔤';
-      photo.b64 = null;
-      renderThumbs();
-      setBusy('Lendo texto da foto…');
-      const { text, lines } = await readWithOcr(photo.img);
-      photo.status = '✓';
-      $('#ocr-text').textContent = text || '(nenhum texto encontrado)';
-      $('#ocr-raw').hidden = false;
-      const n = applyParsed(parseLabel(text, lines), { keepText: true });
+      setReadError('');
+      const n = await lerComOcr(photo);
       toast(n ? `Preenchi ${n} campo${n > 1 ? 's' : ''} — confira os amarelos` : 'Não reconheci dados. Preencha manualmente.', 3500);
     }
   } catch (err) {
     console.error(err);
     photo.status = '⚠️';
-    toast(err.message || 'Falha na leitura. Preencha manualmente.', 4500);
+    setReadError(err.message || 'Falha na leitura desta foto. Preencha manualmente.');
+    toast('Não consegui ler a foto — veja o aviso acima', 4000);
   } finally {
-    photo.img = null;      // libera memória
+    photo.img = null;      // libera memoria
     renderThumbs();
     setBusy('');
   }
@@ -771,7 +878,7 @@ const EXTRACT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    category: { type: 'string', enum: ['papel', 'peso', 'liquido', 'unidade'] },
+    category: { type: 'string', enum: ['papel', 'peso', 'liquido', 'folha', 'unidade'] },
     name: { type: 'string' },
     brand: { type: 'string' },
     type: { type: 'string' },
@@ -784,25 +891,33 @@ const EXTRACT_SCHEMA = {
     unit: { type: 'string', enum: ['g', 'kg', 'ml', 'L', ''] },
     packs: { type: 'integer' },
     count: { type: 'integer' },
+    sheets: { type: 'integer' },
     notes: { type: 'string' },
   },
   required: ['category', 'name', 'brand', 'type', 'price', 'promo_price', 'promo_min_qty', 'rolls',
-    'meters_per_roll', 'qty', 'unit', 'packs', 'count', 'notes'],
+    'meters_per_roll', 'qty', 'unit', 'packs', 'count', 'sheets', 'notes'],
 };
 
-const AI_SYSTEM = `You read photos taken inside a Brazilian supermarket so the shopper can compare the real unit price (per metre, kg, litre or item). All photos in one request show the SAME product: usually the shelf price label, sometimes the package itself (front, back, or an open tray of eggs).
+const AI_SYSTEM = `You read photos taken inside a Brazilian supermarket so the shopper can compare the real unit price (per metre, kg, litre, 100 sheets or item). All photos in one request show the SAME product: usually the shelf price label, sometimes the package itself (front, back, or an open tray of eggs).
+
+SHELF LABELS IN BRAZIL OFTEN HAVE TWO COLUMNS:
+- left: product description and the REGULAR price, in large type;
+- right: a dark banner "A partir de 3 UN / a UN sai por:" (or "LEVE 3 PAGUE 2") and the PROMOTIONAL price.
+The promotional price is often printed LARGER than the regular one. Never let the banner text or the promotional column leak into name, price or quantities: "3 UN" there is the minimum purchase, NOT how many items are in the package. On a poster, the banner may sit on its own line with the promotional price just below it.
+Labels also print the unit price in small type ("Preço por MT R$0,06", "Preço por LT R$2,85", "R$ 19,96 o litro"). That is NEVER the price field - but do use it to sanity-check yourself: price divided by the total quantity should land near it. Beware: the store's "UN" sometimes means one roll or one piece inside the package, so treat it as a hint, not as truth.
 
 Fill every field of the JSON schema:
-- category: "papel" for products on rolls compared per metre (toilet paper, paper towels, aluminium foil, cling film); "liquido" when the net content is a volume; "peso" when it is a weight; "unidade" for products compared per item (eggs, diapers, tea bags, batteries, etc.).
-- name: short product name as a shopper would say it, in Portuguese with normal capitalisation, expanding shelf-label abbreviations (e.g. "PAP HIG MIL FT 20M" -> "Papel higiênico folha tripla 20 m"). No price or promotion text in the name.
+- category: "papel" for products on rolls compared per metre (toilet paper, aluminium foil, cling film); "folha" for paper towels and napkins counted in sheets ("50F", "360F", "60 toalhas", "100 folhas") - these are compared per 100 sheets, not per metre; "liquido" when the net content is a volume; "peso" when it is a weight; "unidade" for products compared per item (eggs, diapers, wet wipes, tea bags, batteries, towel sets and anything else sold by the piece).
+- name: short product name as a shopper would say it, in Portuguese with normal capitalisation, expanding shelf-label abbreviations ("PAP HIG MIL FT 20M" -> "Papel higiênico folha tripla 20 m"; "CERV" -> "Cerveja"; "REFRI" -> "Refrigerante"; "LENCO HIG UMED" -> "Lenço umedecido"; "AGUA SANIT" -> "Água sanitária"; "SALG" -> "Salgadinho"; "FD"/"FT" -> "folha dupla"/"folha tripla"). No price or promotion text in the name.
 - brand: the brand, or "" if not visible.
-- type: generic product type in Portuguese used to group comparable products, e.g. "Papel higiênico", "Ovos", "Arroz", "Café em pó", "Refrigerante", "Leite".
-- price: the regular price in BRL for ONE package as sold. Shelf labels also print a price per kg/litre/metre/unit in smaller text - never use that one as price. 0 if no price is visible.
-- promo_price / promo_min_qty: if the label offers a lower price from a minimum quantity ("a partir de 2 un", "leve 3", club or app price), the promotional price per package and the minimum quantity (1 if there is no minimum); otherwise 0 and 0.
-- rolls / meters_per_roll: only for "papel" (number of rolls in the package and metres per roll); otherwise 0.
-- qty / unit / packs: net content of ONE item and how many items come in the package (e.g. "12x350ml" -> qty 350, unit "ml", packs 12). Single package -> packs 1. For "papel" and "unidade" use qty 0, unit "", packs 1.
-- count: only for "unidade" - how many items in the package. Prefer the number printed ("30 unidades", "dúzia" = 12, "meia dúzia" = 6). If none is printed, count the visible items (e.g. eggs in a tray: rows x columns) and say so in notes. Otherwise 0.
-- notes: one short sentence in Portuguese for the shopper about anything uncertain or worth knowing (e.g. "Contei 30 ovos (5 x 6).", "O preço de R$ 2,49 vale só a partir de 2 unidades."), or "".
+- type: generic product type in Portuguese used to group comparable products. Use the SAME wording for the same kind of product every time, e.g. "Papel higiênico", "Papel toalha", "Ovos", "Arroz", "Café", "Refrigerante", "Cerveja", "Leite", "Água sanitária", "Lenço umedecido". Never answer just "Papel" for toilet paper - two spellings split the ranking and the products stop being compared.
+- price: the REGULAR price in BRL for ONE package as sold (the left column), even when the promotional price is bigger on the label. 0 if no price is visible.
+- promo_price / promo_min_qty: the promotional price per package and the minimum quantity from the banner ("A partir de 3 UN" -> 3; "LEVE 3 PAGUE 2" -> 3). Otherwise 0 and 0.
+- rolls / meters_per_roll: only for "papel". "C/18" or "18 ROLOS" is the number of rolls; "20M" or "30M" is metres per roll. "L32P28" means a pack of 32 rolls sold at the price of 28, so rolls = 32.
+- sheets: only for "folha" - sheets per roll ("50F" -> 50, "360F" -> 360, "60 toalhas" -> 60). Use packs for how many rolls come in the package ("C/2" -> 2). Otherwise 0.
+- qty / unit / packs: net content of ONE item and how many items come in the package ("12x350ml" -> qty 350, unit "ml", packs 12). Single package -> packs 1. For "papel", "folha" and "unidade" use qty 0, unit "".
+- count: only for "unidade" - how many items in the package ("C/48 UN" -> 48, "30 unidades" -> 30, "2P" -> 2 pieces, "dúzia" = 12, "meia dúzia" = 6). If none is printed, count the visible items (e.g. eggs in a tray: rows x columns) and say so in notes. A single item with no count -> 1. Otherwise 0.
+- notes: one short sentence in Portuguese for the shopper about anything uncertain or worth knowing (e.g. "Contei 30 ovos (5 x 6).", "O preço de R$ 2,49 vale só a partir de 2 unidades.", "A etiqueta diz R$ 0,06/m, mas são 32 rolos: o metro sai por R$ 0,052."), or "".
 If a value is unreadable, use 0 or "" instead of guessing.`;
 
 let sdkPromise = null;
@@ -882,6 +997,7 @@ function fromAi(d) {
     unit: d.unit || undefined,
     packs: d.packs > 0 ? d.packs : undefined,
     count: pos(d.count),
+    sheets: pos(d.sheets),
   };
 }
 
@@ -939,51 +1055,78 @@ async function readWithOcr(img) {
 
 /* =========================================================
    PARSER DE ETIQUETA (usado pelo OCR offline)
-   Etiqueta de prateleira brasileira tem quase sempre:
-     - o nome do produto abreviado, em cima;
-     - o preco do pacote em corpo grande;
-     - o preco por kg/L/m/un em corpo pequeno (NUNCA e o preco a usar);
-     - as vezes uma promocao "a partir de N un" / "leve 3".
-   O parser usa a ALTURA das linhas para separar o preco grande do pequeno.
+   A etiqueta das redes brasileiras tem DUAS COLUNAS:
+     esquerda = produto + preco normal
+     direita  = tarja "A partir de N UN / a UN sai por:" + preco promocional
+   Como as colunas dividem a mesma linha de base, o OCR funde as duas numa
+   linha so. Por isso o parser separa as colunas ANTES de ler qualquer coisa:
+   senao o "3 UN" da promocao vira a quantidade do produto e o preco
+   promocional vira o preco normal.
    ========================================================= */
+
+/** Tarja da promocao: marca onde termina a coluna da esquerda. */
+const RE_TARJA = /(a\s*partir\s*de\s*\d{1,3}\s*(?:un\w*|pe[cç]as?|cx)?|a\s*un\s*sai\s*por|acima\s*de\s*\d{1,3}\s*un\w*|na\s*compra\s*de\s*\d{1,3}|leve\s*\d{1,3}\s*(?:e\s*)?pague\s*\d{1,3})/i;
+const RE_QTD_MIN = /(?:a\s*partir\s*de|acima\s*de|na\s*compra\s*de|levando|leve)\s*(\d{1,3})/i;
+const RE_LEVE_PAGUE = /\bleve\s*(\d{1,3})\s*(?:e\s*)?pague\s*(\d{1,3})\b/i;
+/** "L32P28" na descricao: pacote de 32 rolos com preco de 28. */
+const RE_LPACK = /\bL\s?(\d{1,3})\s?P\s?(\d{1,3})\b/i;
 
 /** Trechos que indicam preco por unidade de medida, e nao o preco do pacote. */
 const RE_PRECO_UNITARIO = /(pre[cç]o\s*(por|do|da)\b|\bpor\s*(kg|quilo|quilograma|litro|lt?\b|metro|mt?\b|unidade|unid|un\b|pe[cç]a)|\bo\s*(kg|quilo|litro|metro)\b|\ba\s*unidade\b|\bcada\s*(kg|quilo|litro|metro|100)|\b100\s*(g|gr|ml)\b|\/\s*(kg|quilo|lt?|litro|mt?|metro|un|unid|pe[cç]a)\b)/i;
+/** Linha que carrega o preco PROMOCIONAL, mesmo sem a tarja ao lado. */
+const RE_LINHA_PROMO = /\bcada\b|sai\s*por|\bpromo|\boferta\b|\bclube\b|\bapp\b|\bsócio|\bsocio\b/i;
 /** Linhas que nunca contem o preco do pacote. */
-const RE_LIXO = /\b(c[oó]d(igo)?|sku|ref|refer[eê]ncia|validade|val\b|ean|barras|origem|lote)\b/i;
-/** Promocao por quantidade minima. */
-const RE_PROMO_MIN = /(?:a\s*partir\s*de|acima\s*de|na\s*compra\s*de|levando)\s*(\d{1,2})\s*(?:un|unid\w*|pe[cç]as?|cx|caixas?)?/i;
-const RE_LEVE_PAGUE = /leve\s*(\d{1,2})\s*(?:e\s*)?pague\s*(\d{1,2})/i;
+const RE_LIXO = /\b(c[oó]d(igo)?|sku|ref|refer[eê]ncia|validade|val\b|ean|barras|origem|lote|pmtr)\b/i;
 
 /** Abreviacoes de etiqueta -> texto legivel. Ordem importa. */
 const ABREVS = [
   [/\bpap(el)?\s*hig(i[eê]n\w*)?\b/gi, 'Papel higiênico'],
-  [/\bpap(el)?\s*toa?l?h?a?\b/gi, 'Papel toalha'],
-  [/\bf(ol)?h(a)?\s*dupla\b|\bfd\b/gi, 'folha dupla'],
-  [/\bf(ol)?h(a)?\s*tripla\b|\bft\b/gi, 'folha tripla'],
-  [/\bf(ol)?h(a)?\s*simples\b|\bfs\b/gi, 'folha simples'],
-  [/\brefrig(erante)?\b/gi, 'Refrigerante'],
+  [/\btoalha\s*pap(el)?\b|\bpap(el)?\s*toalha\b/gi, 'Papel toalha'],
+  [/\blen[cç]o\w*\s*hig\w*\s*umed\w*\b|\blen[cç]o\w*\s*umed\w*\b/gi, 'Lenço umedecido'],
+  [/\b[aá]gua\s*sanit\w*\b/gi, 'Água sanitária'],
+  [/\bcerv(eja)?\b/gi, 'Cerveja'],
+  [/\brefri(g(erante)?)?\b/gi, 'Refrigerante'],
+  [/\bsalg(ado|adinho)?\b/gi, 'Salgadinho'],
   [/\bachoc(olatado)?\b/gi, 'Achocolatado'],
   [/\bdeterg(ente)?\b/gi, 'Detergente'],
   [/\bamac(iante)?\b/gi, 'Amaciante'],
   [/\bsab(ao|ão)\s*(em\s*)?p[oó]\b/gi, 'Sabão em pó'],
   [/\bcond(icionador)?\b/gi, 'Condicionador'],
+  [/\bf(ol)?h(a)?\s*dupla\b|\bfd\b/gi, 'folha dupla'],
+  [/\bf(ol)?h(a)?\s*tripla\b|\bft\b/gi, 'folha tripla'],
+  [/\bf(ol)?h(a)?\s*simples\b|\bfs\b/gi, 'folha simples'],
   [/\bint(egral)?\b(?=\s|$)/gi, 'integral'],
   [/\bdesn(atado)?\b/gi, 'desnatado'],
   [/\bc\/\s*(\d)/gi, 'com $1'],
 ];
 
-/** Tipos genericos reconhecidos pelo texto da etiqueta, para agrupar no ranking. */
+/** Tipo generico canonico: e ele que agrupa os produtos no ranking.
+    Sem isso o mesmo papel higienico cai em "Papel" e em "Papel higienico"
+    e os dois nunca se comparam. */
 const TIPOS = [
-  [/papel\s*hig/i, 'Papel higiênico'], [/papel\s*toalha/i, 'Papel toalha'],
+  [/papel\s*toalha|toalha\s*de\s*papel/i, 'Papel toalha'],
+  [/papel\s*hig|\bpapel\b(?!\s*toalha)/i, 'Papel higiênico'],
   [/guardanapo/i, 'Guardanapo'], [/alum[ií]nio/i, 'Papel alumínio'],
+  [/len[cç]o\w*\s*umed/i, 'Lenço umedecido'], [/len[cç]o/i, 'Lenço de papel'],
+  [/[aá]gua\s*sanit/i, 'Água sanitária'],
   [/\bovos?\b/i, 'Ovos'], [/\barroz\b/i, 'Arroz'], [/\bfeij[ãa]o\b/i, 'Feijão'],
-  [/\bcaf[eé]\b/i, 'Café'], [/\bleite\b/i, 'Leite'], [/refrigerante|\brefrig\b/i, 'Refrigerante'],
-  [/\bcerveja\b/i, 'Cerveja'], [/\b[aá]gua\b/i, 'Água'], [/\bsuco\b/i, 'Suco'],
+  [/\bcaf[eé]\b/i, 'Café'], [/\bleite\b/i, 'Leite'],
+  [/refrigerante/i, 'Refrigerante'], [/\bcerveja\b/i, 'Cerveja'],
+  [/\bsuco\b/i, 'Suco'], [/\b[aá]gua\b/i, 'Água'],
+  [/salgadinho|\bchips\b/i, 'Salgadinho'], [/\bbiscoito|bolacha\b/i, 'Biscoito'],
   [/\bfralda/i, 'Fraldas'], [/\bsabonete\b/i, 'Sabonete'], [/detergente/i, 'Detergente'],
+  [/\bamaciante\b/i, 'Amaciante'], [/sab[ãa]o\s*em\s*p[óo]/i, 'Sabão em pó'],
   [/\b[oó]leo\b/i, 'Óleo'], [/\ba[cç][uú]car\b/i, 'Açúcar'], [/\bmacarr[ãa]o\b/i, 'Macarrão'],
   [/\bmanteiga\b/i, 'Manteiga'], [/\bqueijo\b/i, 'Queijo'], [/\bfarinha\b/i, 'Farinha'],
+  [/jogo\s*(de\s*)?toalha|toalha\s*(de\s*)?banho/i, 'Jogo de toalha'],
+  [/\bcarne\b|picanha|alcatra|patinho|coxao/i, 'Carne bovina'],
 ];
+/** Normaliza o que o usuario digitou ou a foto leu para o tipo canonico. */
+function tipoCanonico(t) {
+  if (!t) return t;
+  const achado = TIPOS.find(([re]) => re.test(t));
+  return achado ? achado[1] : t.trim();
+}
 
 /** Corrige confusoes classicas do OCR em numeros (O/0, l/1, S/5). */
 function limpaNum(t) {
@@ -1002,97 +1145,165 @@ function looksLikeWords(l) {
     && words.filter(w => w.length <= 2).length <= words.length / 2;
 }
 
-/** Todos os valores monetarios de um texto, com a posicao em que aparecem. */
+/** Valores monetarios de um texto, com o que vem logo depois deles. */
 function achaValores(txt) {
   const re = /(R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2}|\d{1,4},\d{2}|\d{1,4}\.\d{2})(?!\d)/g;
   const out = [];
   let m;
   while ((m = re.exec(txt))) {
     const depois = txt.slice(m.index + m[0].length, m.index + m[0].length + 12);
-    // "500,00 ml" nao e preco, e quantidade
-    if (/^\s*(kg|g|gr|ml|l|lt|m|mts?|un)\b/i.test(depois)) continue;
+    if (/^\s*(kg|g|gr|ml|l|lt|m|mts?|un)\b/i.test(depois)) continue;   // quantidade, nao preco
     out.push({ valor: num(m[2]), temCifrao: !!m[1], idx: m.index, depois });
   }
   return out;
 }
 
+/** Separa cada linha em coluna normal (esquerda) e coluna da promocao (direita).
+    Dois layouts aparecem na pratica:
+      a) duas colunas na mesma linha  -> "PAPEL HIG PERSONAL FD | A partir de 2 UN"
+      b) tarja sozinha e o preco promocional na linha DE BAIXO (cartaz de oferta)
+    No caso (b) a linha seguinte tambem pertence a promocao. */
+function separaColunas(ls) {
+  const esq = [], dir = [];
+  let tarjaSozinhaAcima = false;
+  for (const l of ls) {
+    const m = l.text.match(RE_TARJA);
+    if (m && m.index > 0) {
+      esq.push({ ...l, text: l.text.slice(0, m.index).trim() });
+      dir.push({ ...l, text: l.text.slice(m.index).trim() });
+      tarjaSozinhaAcima = false;
+    } else if (m) {
+      dir.push(l);
+      tarjaSozinhaAcima = !achaValores(l.text).length;   // tarja sem preco: o preco vem abaixo
+    } else if (tarjaSozinhaAcima && achaValores(l.text).length && !RE_PRECO_UNITARIO.test(l.text)) {
+      dir.push(l);
+      tarjaSozinhaAcima = false;
+    } else {
+      esq.push(l);
+      tarjaSozinhaAcima = false;
+    }
+  }
+  return { esq: esq.filter(l => l.text), dir: dir.filter(l => l.text) };
+}
+
+/** Nota de um valor como "preco do pacote" desta linha. */
+function notaPreco(v, l, maxH) {
+  if (RE_PRECO_UNITARIO.test(v.depois)) return null;        // "12,99 / kg"
+  if (RE_PRECO_UNITARIO.test(l.text)) return null;          // "Preço por MT R$0,06"
+  if (RE_LIXO.test(l.text)) return null;
+  const alt = (l.h || 0) / maxH;
+  let nota = 4 + (v.temCifrao ? 2 : 0) + alt * 6;
+  if (v.valor < 0.2) nota -= 3;                             // pacote raramente custa < R$0,20
+  if (RE_LINHA_PROMO.test(l.text)) nota -= 7;               // "R$ 25,90 CADA" e o preco promocional
+  return nota;
+}
+
+/** Como melhorPreco, mas sem descontar a penalidade de linha promocional:
+    serve para escolher o melhor valor DENTRO da propria promocao. */
+function melhorPrecoBruto(ls, maxH) {
+  let melhor = null;
+  for (const l of ls) {
+    for (const v of achaValores(l.text)) {
+      if (RE_PRECO_UNITARIO.test(v.depois) || RE_PRECO_UNITARIO.test(l.text) || RE_LIXO.test(l.text)) continue;
+      const nota = 4 + (v.temCifrao ? 2 : 0) + ((l.h || 0) / maxH) * 6;
+      if (!melhor || nota > melhor.nota) melhor = { ...v, nota, linha: l.text };
+    }
+  }
+  return melhor;
+}
+
+/** Melhor candidato a preco entre um conjunto de linhas. */
+function melhorPreco(ls, maxH) {
+  let melhor = null;
+  for (const l of ls) {
+    for (const v of achaValores(l.text)) {
+      const nota = notaPreco(v, l, maxH);
+      if (nota == null) continue;
+      if (!melhor || nota > melhor.nota) melhor = { ...v, nota, linha: l.text, alt: (l.h || 0) / maxH };
+    }
+  }
+  return melhor;
+}
+
 /** Extrai preço, quantidades e categoria do texto do OCR. */
 function parseLabel(raw, lines = []) {
   const out = {};
-  const flat = limpaNum(raw.replace(/\s+/g, ' '));
-
-  // Normaliza as linhas: usa as do Tesseract (com altura) ou quebra o texto.
-  // Versao com as abreviacoes expandidas: "PAP HIG" precisa virar "Papel higienico"
-  // ANTES de decidir a categoria, senao a etiqueta abreviada cai na regra errada.
-  let flatExp = flat;
-  for (const [re, sub] of ABREVS) flatExp = flatExp.replace(re, sub);
-
   const ls = (lines.length ? lines : raw.split('\n').map(text => ({ text, conf: 100, h: 0 })))
     .map(l => ({ ...l, text: limpaNum((l.text || '').trim()) }))
     .filter(l => l.text);
   const maxH = Math.max(1, ...ls.map(l => l.h || 0));
+  const { esq, dir } = separaColunas(ls);
 
-  /* ---------- preço do pacote ---------- */
-  // Cada valor monetario recebe uma nota. O preco por kg/L/m perde pontos;
-  // o corpo grande ganha. Assim "R$ 89,90 o kg" nao vence "R$ 107,88".
-  let melhor = null;
-  const promoCands = [];
-  for (const l of ls) {
-    const ehUnitario = RE_PRECO_UNITARIO.test(l.text);
-    const ehLixo = RE_LIXO.test(l.text);
-    const minProm = l.text.match(RE_PROMO_MIN) || l.text.match(RE_LEVE_PAGUE);
-    const alt = (l.h || 0) / maxH;
-    for (const v of achaValores(l.text)) {
-      if (RE_PRECO_UNITARIO.test(v.depois)) continue;           // "12,99 / kg"
-      let nota = 4 + (v.temCifrao ? 2 : 0) + alt * 6;
-      if (ehUnitario) nota -= 11;
-      if (ehLixo) nota -= 8;
-      if (v.valor < 0.2) nota -= 3;                              // preco de pacote raramente < R$0,20
-      const cand = { ...v, nota, linha: l.text, alt };
-      if (minProm || /\bcada\b|\bpromo|\boferta\b|\bclube\b|\bapp\b/i.test(l.text)) {
-        promoCands.push(cand);
-        nota -= 5;                                               // preco promocional nao e o preco normal
-        cand.nota = nota;
-      }
-      if (!melhor || nota > melhor.nota) melhor = cand;
-    }
-  }
+  // Texto SO da coluna normal: quantidades e nome saem daqui, nunca da tarja.
+  const flat = esq.map(l => l.text).join(' ').replace(/\s+/g, ' ');
+  const flatTudo = ls.map(l => l.text).join(' ').replace(/\s+/g, ' ');
+  let flatExp = flat;
+  for (const [re, sub] of ABREVS) flatExp = flatExp.replace(re, sub);
+
+  /* ---------- preço normal e preço promocional ---------- */
+  const temTarja = ls.some(l => RE_TARJA.test(l.text));
+  const melhor = melhorPreco(esq, maxH);
   if (melhor) out.price = melhor.valor;
 
-  /* ---------- promoção ---------- */
-  const mMin = flat.match(RE_PROMO_MIN);
-  const mLeve = flat.match(RE_LEVE_PAGUE);
-  const promoVal = promoCands.filter(c => c !== melhor).sort((a, b) => b.alt - a.alt)[0];
-  if (mLeve) {
-    out.promo = { price: promoVal ? promoVal.valor : (out.price * (+mLeve[2] / +mLeve[1])), minQty: +mLeve[1] };
-  } else if (mMin && promoVal) {
-    out.promo = { price: promoVal.valor, minQty: +mMin[1] || 1 };
+  let promoVal = melhorPreco(dir, maxH);
+  // Quando as duas colunas caem na mesma linha ("R$ 49,90 R$ 48,49"), a da
+  // esquerda e o preco normal e a da direita e o promocional.
+  if (temTarja && melhor && !promoVal) {
+    for (const l of esq) {
+      const vs = achaValores(l.text).filter(v => notaPreco(v, l, maxH) != null);
+      if (vs.length >= 2 && vs.some(v => v.valor === melhor.valor)) {
+        const depois = vs.filter(v => v.idx > melhor.idx);
+        if (depois.length) promoVal = depois[0];
+        break;
+      }
+    }
   }
-  if (out.promo && !(out.promo.price > 0)) delete out.promo;
+  if (temTarja && !promoVal) {
+    // Promocao em linha propria ("A PARTIR DE 2 UN" / "R$ 25,90 CADA"), sem duas colunas.
+    const linhasPromo = esq.filter(l => RE_LINHA_PROMO.test(l.text));
+    const cand = melhorPrecoBruto(linhasPromo, maxH);
+    if (cand && cand.valor !== (melhor && melhor.valor)) promoVal = cand;
+  }
+  const mLeve = flatTudo.match(RE_LEVE_PAGUE);
+  const mMin = (dir.map(l => l.text).join(' ') || flatTudo).match(RE_QTD_MIN);
+  if (promoVal && promoVal.valor > 0 && promoVal.valor !== out.price) {
+    out.promo = { price: promoVal.valor, minQty: mMin ? +mMin[1] : (mLeve ? +mLeve[1] : 1) };
+  } else if (mLeve && out.price > 0) {
+    out.promo = { price: out.price * (+mLeve[2] / +mLeve[1]), minQty: +mLeve[1] };
+  }
 
-  /* ---------- quantidades ---------- */
+  /* ---------- quantidades (só da coluna normal) ---------- */
+  const lpack = flat.match(RE_LPACK);                       // L32P28 -> 32 rolos
   const mult = flat.match(/(\d{1,2})\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(kg|g|gr|ml|l|lt)\b/i)
     || flat.match(/(\d+(?:[.,]\d+)?)\s*(kg|g|gr|ml|l|lt)\b\s*[x×]\s*(\d{1,2})\b/i);
   const multInv = mult && /^\d+(?:[.,]\d+)?$/.test(mult[1]) && /^(kg|g|gr|ml|l|lt)$/i.test(mult[2]);
   const peso = flat.match(/(\d+(?:[.,]\d+)?)\s*(kg|quilos?|kgs|g|gr|gramas?)\b/i);
   const volume = flat.match(/(\d+(?:[.,]\d+)?)\s*(ml|mls|l|lt|litros?)\b/i);
-  // "rl?s?" aceitaria um "r" solto e casava com o R de "R$" (19,90 R$ -> 90 rolos).
   const rolos = flat.match(/(\d{1,3})\s*(rolos?|rls?)\b(?!\s*\$)/i)
     || flat.match(/\bc\/\s*(\d{1,3})\b/i) || flat.match(/\bcom\s*(\d{1,3})\s*rolos?\b/i);
-  const metros = flat.match(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(m|mts?|metros?)\b(?!\s*[ĺl])/i);
-  const unids = flat.match(/(\d{1,3})\s*(unidades?|unid\.?|un\b|und\b|ovos|pe[cç]as?|fraldas?|toalhas?|c[aá]psulas?|saches?|sach[eê]s?)\b/i)
+  const metros = flat.match(/(\d{1,3}(?:[.,]\d{1,2})?)\s*(m|mts?|metros?)\b/i);
+  // "50F" / "360 folhas": papel toalha e vendido por folha, nao por metro.
+  const folhas = flat.replace(RE_LPACK, ' ').match(/(\d{2,4})\s*(?:f\b|fls?\b|folhas?\b|toalhas?\b)/i);
+  // "2P" = 2 pecas (jogo de toalha). Ignora o P de L32P28.
+  const pecas = flat.replace(RE_LPACK, ' ').match(/(\d{1,2})\s*(?:p\b|pe[cç]as?\b)/i);
+  const unids = flat.match(/(\d{1,3})\s*(unidades?|unid\.?|un\b|und\b|ovos|fraldas?|c[aá]psulas?|sach[eê]s?)\b/i)
     || flat.match(/\b(?:c\/|com|contendo|bandeja\s*c?\/?)\s*(\d{1,3})\s*(?:unidades?|unid|un\b|ovos)?/i);
   const ovos = /\bovos?\b/i.test(flatExp);
   const duzia = /meia\s*d[uú]zia/i.test(flat) ? 6 : /d[uú]zia/i.test(flat) ? 12 : 0;
-  const ehPapel = /papel|rolo|toalha|guardanapo|alum[ií]nio|pvc|filme/i.test(flatExp);
+  const ehToalhaPapel = /papel\s*toalha|toalha\s*de\s*papel/i.test(flatExp);
+  const ehPapelRolo = /papel\s*higi|papel\b|rolo|guardanapo|alum[ií]nio|pvc|filme/i.test(flatExp) && !ehToalhaPapel;
 
   if (ovos || (duzia && !peso && !volume)) {
     out.category = 'unidade';
     out.count = unids ? num(unids[1]) : duzia || undefined;
-  } else if (ehPapel && (rolos || metros)) {
+  } else if (ehToalhaPapel && folhas) {
+    out.category = 'folha';
+    out.sheets = num(folhas[1]);
+    if (rolos) out.packs = num(rolos[1]);
+  } else if (ehPapelRolo && (rolos || metros || lpack)) {
     out.category = 'papel';
-    if (rolos) out.rolls = num(rolos[1]);
-    else if (unids && !/toalhas?/i.test(unids[2] || '')) out.rolls = num(unids[1]);
+    if (lpack) out.rolls = num(lpack[1]);                   // leve 32 pague 28 -> 32 rolos
+    else if (rolos) out.rolls = num(rolos[1]);
     if (metros) out.metersPerRoll = num(metros[1]);
   } else if (mult) {
     const packs = num(multInv ? mult[3] : mult[1]);
@@ -1111,43 +1322,60 @@ function parseLabel(raw, lines = []) {
     out.category = 'peso';
     out.qty = num(peso[1]);
     out.unit = /^(kg|quilo)/i.test(peso[2]) ? 'kg' : 'g';
+  } else if (folhas) {
+    out.category = 'folha';
+    out.sheets = num(folhas[1]);
+    if (rolos) out.packs = num(rolos[1]);
   } else if (unids) {
     out.category = 'unidade';
     out.count = num(unids[1]);
+  } else if (pecas) {
+    out.category = 'unidade';
+    out.count = num(pecas[1]);
   }
 
-  /* ---------- confere o preço contra o preço por unidade impresso ----------
-     Se a etiqueta diz "R$ 5,18 o kg" e o pacote tem 5 kg, o preco tem de ficar
-     perto de R$ 25,90. Se o candidato escolhido estiver muito longe disso,
-     troca por outro candidato que feche a conta. */
-  const mUnit = flat.match(/(R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2})\s*(?:\/|\bo\b|\bpor\b|\ba\b|\bcada\b)?\s*(kg|quilo|litro|lt?\b|metro|mt?\b|unidade|un\b)/i);
+  /* ---------- confere contra o preço por unidade impresso na etiqueta ----------
+     A etiqueta imprime "Preço por MT R$0,06" / "Preço por LT R$2,85". Se o
+     preco escolhido nao bate com isso vezes a quantidade, troca por um
+     candidato que feche a conta. */
+  const mUnit = flatTudo.match(/pre[cç]o\s*(?:por|do|da)\s*(kg|lt?|mt?|un\w*|litro|metro|quilo)\s*(?:R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2})/i)
+    || flatTudo.match(/(R\s*\$)?\s*(\d{1,4}(?:\.\d{3})*,\d{2})\s*(?:\/|\bo\b|\bpor\b|\ba\b|\bcada\b)\s*(kg|quilo|litro|lt?\b|metro|mt?\b|unidade|un\b)/i);
+  const UNID_CAT = { kg: 'peso', quilo: 'peso', l: 'liquido', lt: 'liquido', litro: 'liquido',
+                     m: 'papel', mt: 'papel', metro: 'papel', un: 'unidade', unidade: 'unidade' };
   if (mUnit && out.category) {
+    const unidLabel = (mUnit[1] && !mUnit[1].includes('$') ? mUnit[1] : mUnit[3] || '').toLowerCase().replace(/[^a-zç]/g, '');
+    const valorUnit = num(mUnit[2].includes(',') ? mUnit[2] : mUnit[3]);
+    // A loja imprime "por UN" tanto para rolo quanto para pacote: so vale se
+    // a unidade dela for a mesma medida que o app usa para esta categoria.
+    if (UNID_CAT[unidLabel] !== out.category) { out.unitPriceLabel = valorUnit; }
+    else {
     const base = baseQty({
       category: out.category, rolls: out.rolls, metersPerRoll: out.metersPerRoll,
-      qty: out.qty, unit: out.unit, packs: out.packs || 1, count: out.count,
+      qty: out.qty, unit: out.unit, packs: out.packs || 1, count: out.count, sheets: out.sheets,
     });
-    const esperado = num(mUnit[2]) * base;
+    const esperado = valorUnit * base;
     if (Number.isFinite(esperado) && esperado > 0) {
       const todos = ls.flatMap(l => achaValores(l.text).map(v => v.valor));
       const perto = todos.filter(v => Math.abs(v / esperado - 1) <= 0.12)
         .sort((a, b) => Math.abs(a - esperado) - Math.abs(b - esperado))[0];
       if (perto && (!(out.price > 0) || Math.abs(out.price / esperado - 1) > 0.25)) out.price = perto;
     }
+    }
   }
 
   /* ---------- tipo, marca e nome ---------- */
-  out.type = (TIPOS.find(([re]) => re.test(flatExp)) || [])[1];
+  out.type = tipoCanonico((TIPOS.find(([re]) => re.test(flatExp)) || [])[1]);
   if (out.category === 'unidade' && ovos) out.type = 'Ovos';
 
   const marcas = [...new Set(state.entries.map(e => e.brand).filter(b => b && b.length > 1))];
   const nflat = norm(flat);
   out.brand = marcas.find(b => new RegExp(`\\b${norm(b).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(nflat));
 
-  // Nome: a linha de texto mais alta que nao seja preco nem lixo.
-  const cands = ls
+  // Nome: so da coluna da esquerda, a linha mais alta com cara de texto.
+  const cands = esq
     .filter(l => (l.conf ?? 100) >= 60 && !RE_LIXO.test(l.text) && !RE_PRECO_UNITARIO.test(l.text))
     .map(l => ({ h: l.h || 0, t: l.text.replace(/[^\p{L}\d\s.,%\/-]/gu, ' ').replace(/\s+/g, ' ').trim() }))
-    .filter(l => looksLikeWords(l.t) && !/R\s?\$|\d+,\d{2}|pre[cç]o|oferta|promo|a partir|leve\s*\d/i.test(l.t));
+    .filter(l => looksLikeWords(l.t) && !/R\s?\$|\d+,\d{2}|pre[cç]o|oferta|promo/i.test(l.t));
   if (cands[0]) {
     let nome = cands[0].t;
     for (const [re, sub] of ABREVS) nome = nome.replace(re, sub);
@@ -1195,7 +1423,7 @@ function applyParsed(p, { keepText = false } = {}) {
     el.classList.add('autofilled');
     count++;
   };
-  const qtyIds = { papel: ['rolls', 'mpr'], peso: ['wqty', 'wpacks'], liquido: ['vqty', 'vpacks'], unidade: ['count'] };
+  const qtyIds = { papel: ['rolls', 'mpr'], peso: ['wqty', 'wpacks'], liquido: ['vqty', 'vpacks'], folha: ['sheets', 'fpacks'], unidade: ['count'] };
   const curCat = form.dataset.category;
   const userTypedQty = qtyIds[curCat].some(id => F(id).dataset.user === '1');
   const conflito = p.category && p.category !== curCat && userTypedQty;
@@ -1205,7 +1433,7 @@ function applyParsed(p, { keepText = false } = {}) {
   set('price', p.price, money);
   set('name', p.name);
   set('brand', p.brand);
-  set('type', p.type);
+  set('type', tipoCanonico(p.type));
   // Houve leitura de outra categoria, mas voce ja tinha digitado quantidades aqui:
   // em vez de descartar calado, oferece a troca.
   if (conflito) pendingCat = { parsed: p, cat: p.category };
@@ -1220,6 +1448,7 @@ function applyParsed(p, { keepText = false } = {}) {
       if (p.packs > 1) set(k, p.packs);
       else if (p.packs === 1 && canWrite(F(k))) F(k).value = '';
     }
+    if (cat === 'folha') { set('sheets', p.sheets); if (p.packs > 1) set('fpacks', p.packs); }
     if (cat === 'unidade') set('count', p.count);
   }
   if (p.promo !== undefined) setPromo(p.promo);

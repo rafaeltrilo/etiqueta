@@ -69,6 +69,7 @@
             <span id="ocr-msg">Lendo…</span>
             <progress id="ocr-progress" max="1"></progress>
           </div>
+          <div id="read-error" class="read-error" hidden></div>
           <p id="ai-notes" class="ai-notes" hidden></p>
           <p id="read-mode" class="small read-mode"></p>
           <label class="check"><input type="checkbox" id="ocr-auto" checked> Ler a foto automaticamente</label>
@@ -132,6 +133,14 @@
           </label>
           <label class="field">Embalagens no pacote
             <input id="f-vpacks" inputmode="numeric" placeholder="1">
+          </label>
+        </div>
+        <div class="qty" data-for="folha">
+          <label class="field">Folhas por rolo
+            <input id="f-sheets" inputmode="numeric" placeholder="Ex.: 50">
+          </label>
+          <label class="field">Rolos no pacote
+            <input id="f-fpacks" inputmode="numeric" placeholder="1">
           </label>
         </div>
         <div class="qty" data-for="unidade">
