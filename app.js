@@ -15,6 +15,10 @@ const AI_MODEL = 'claude-opus-5-5';
 const STORAGE_KEY = 'precoreal:v1';
 const KEY_STORAGE = 'precoreal:apikey';   // separado do backup: nunca é exportado
 const MAX_AI_PHOTOS = 4;
+// Versao do app. Mude JUNTO com VERSION no sw.js a cada publicacao:
+// e ela que aparece em Configuracoes para conferir se o celular ja atualizou.
+const APP_VERSION = 'v5';
+const APP_DATA = '11/11/2026';
 const THUMB_DB = 'precoreal-fotos';
 const THUMB_STORE = 'thumbs';
 
@@ -1460,6 +1464,8 @@ function applyParsed(p, { keepText = false } = {}) {
    VIEW: CONFIGURAÇÕES (chave da IA)
    ========================================================= */
 function renderSettings() {
+  const v = $('#app-version');
+  if (v) v.textContent = `Versão ${APP_VERSION} · ${APP_DATA}`;
   const key = getApiKey();
   $('#s-key').value = key;
   $('#key-status').textContent = key ? '✔️ Chave salva neste celular.' : 'Nenhuma chave salva — usando leitura básica (OCR).';
@@ -1698,14 +1704,20 @@ window.addEventListener('appinstalled', () => { $('#btn-install').hidden = true;
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js');
-      // Avisa quando uma versao nova do app estiver pronta.
+      // updateViaCache 'none': o navegador guarda o proprio sw.js por ate 24 h.
+      // Sem isso ele nem chega a perceber que existe uma versao nova publicada.
+      const reg = await navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
+      reg.update().catch(() => {});
+      // Confere de novo toda vez que o app volta para a frente.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) reg.update().catch(() => {});
+      });
       reg.addEventListener('updatefound', () => {
         const sw = reg.installing;
         if (!sw) return;
         sw.addEventListener('statechange', () => {
           if (sw.state === 'installed' && navigator.serviceWorker.controller) {
-            toast('Nova versão disponível — toque para atualizar', 8000);
+            toast('Nova versão disponível — toque para atualizar', 10000);
             $('#toast').onclick = () => { sw.postMessage('skip-waiting'); location.reload(); };
           }
         });
@@ -1714,17 +1726,22 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   });
 }
 
-$('#cat-conflict')?.addEventListener('click', () => {
-  if (!pendingCat) return;
-  const { parsed, cat } = pendingCat;
-  pendingCat = null;
-  // a troca e pedida por voce: limpa a marca de "digitado" das quantidades
-  for (const id of ['rolls', 'mpr', 'wqty', 'wpacks', 'vqty', 'vpacks', 'count']) delete F(id).dataset.user;
-  setCategory(cat);
-  applyParsed({ ...parsed, name: undefined, brand: undefined, type: undefined, price: undefined });
-  renderCatConflict();
-  toast('Categoria trocada com os dados lidos');
-});
+/** Apaga service worker e caches e recarrega: saida de emergencia quando o
+    celular insiste em abrir uma versao antiga. */
+async function forcarAtualizacao() {
+  if (!confirm('Baixar a versão mais recente do app?\n\nSeus produtos e fotos continuam salvos.')) return;
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch (err) { console.warn(err); }
+  location.replace(location.pathname + '?atualizado=' + Date.now());
+}
 
 /* ---------- inicialização ---------- */
 resetForm();
@@ -1739,3 +1756,5 @@ showView(location.hash.slice(1) || 'compare');
   await pruneThumbs();
   refresh();
 })();
+
+$('#btn-force-update')?.addEventListener('click', forcarAtualizacao);
