@@ -6,7 +6,10 @@ custo-benefício — ajudando a escapar da *reduflação*.
 
 ## Funcionalidades
 
-- 📷 **Fotos da etiqueta e da embalagem** (várias por produto, processadas em fila):
+- 📷 **Fotos da etiqueta e da embalagem** (várias por produto, processadas em fila).
+  Antes de ler, o app **acha a etiqueta na foto e recorta** — a foto do celular é
+  vertical e a etiqueta é uma faixa fina, então recortar dobra a resolução do texto
+  pequeno (`C/48`, `L32P28`, `50F`, "Preço por MT"), que é justamente o que saía errado.
   - **Leitura por IA (Claude)** — recomendada. Entende etiquetas de prateleira reais:
     nome, marca, preço, promoções "a partir de N un", peso/volume/metros/rolos e
     **nº de unidades** (conta os ovos da bandeja se não estiver escrito). Ative em ⚙️
@@ -35,6 +38,11 @@ custo-benefício — ajudando a escapar da *reduflação*.
   - Peso → R$/kg (g ou kg, com nº de embalagens no pacote)
   - Líquido → R$/L (ml ou L, com nº de embalagens)
   - Unidade → R$/un (ovos, fraldas, etc.)
+- 💳 **Parcelado × à vista (aba Juros)**: com o preço à vista, nº e valor das
+  parcelas, entrada e vencimento da 1ª parcela (no ato, 30, 45, 60 ou 90 dias),
+  mostra o total parcelado, quanto se paga a mais e os **juros reais ao mês e ao
+  ano** (taxa interna de retorno). Lê placas e folhetos por foto. As simulações
+  ficam salvas e entram no backup.
 - 🏆 **Ranking da visita**: produtos do mesmo *tipo* (ex.: "Papel higiênico")
   ordenados do mais barato ao mais caro, com destaque verde e % de diferença.
 - 📒 **Histórico local**: último preço pago, menor/maior preço, tendência ▲▼ e
@@ -72,7 +80,8 @@ Abra http://localhost:8080 (use o modo celular do DevTools).
 Os testes do parser de etiqueta rodam sem navegador:
 
 ```bash
-node test/parser.test.mjs
+node test/parser.test.mjs   # 26 etiquetas de supermercado
+node test/juros.test.mjs    # taxa de juros e leitura de anúncio
 ```
 
 São 26 etiquetas em `test/etiquetas.json`, cada uma com as linhas e as alturas

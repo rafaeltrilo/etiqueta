@@ -17,7 +17,7 @@ const KEY_STORAGE = 'precoreal:apikey';   // separado do backup: nunca é export
 const MAX_AI_PHOTOS = 4;
 // Versao do app. Mude JUNTO com VERSION no sw.js a cada publicacao:
 // e ela que aparece em Configuracoes para conferir se o celular ja atualizou.
-const APP_VERSION = 'v5';
+const APP_VERSION = 'v6';
 const APP_DATA = '11/11/2026';
 const THUMB_DB = 'precoreal-fotos';
 const THUMB_STORE = 'thumbs';
@@ -75,9 +75,9 @@ function toast(msg, ms = 2600) {
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (s && Array.isArray(s.entries)) return { visits: [], lastStore: '', ...s };
+    if (s && Array.isArray(s.entries)) return { visits: [], lastStore: '', financings: [], ...s };
   } catch { /* dado corrompido: recomeça */ }
-  return { entries: [], visits: [], currentVisitId: null, lastStore: '' };
+  return { entries: [], visits: [], financings: [], currentVisitId: null, lastStore: '' };
 }
 let state = load();
 
@@ -148,7 +148,7 @@ async function dropThumb(id) {
 }
 /** Remove do IndexedDB as fotos que nao pertencem mais a nenhum registro. */
 async function pruneThumbs() {
-  const used = new Set(state.entries.map(e => e.thumbId).filter(Boolean));
+  const used = new Set([...state.entries, ...(state.financings || [])].map(e => e.thumbId).filter(Boolean));
   for (const id of [...thumbs.keys()]) if (!used.has(id)) await dropThumb(id);
 }
 const thumbOf = e => (e && e.thumbId ? thumbs.get(e.thumbId) : null) || null;
@@ -156,7 +156,7 @@ const thumbOf = e => (e && e.thumbId ? thumbs.get(e.thumbId) : null) || null;
 /** Backups antigos / estado antigo guardavam a foto como dataURL em e.thumb. */
 async function migrateThumbs() {
   let moved = 0;
-  for (const e of state.entries) {
+  for (const e of [...state.entries, ...(state.financings || [])]) {
     if (!e.thumb) continue;
     const id = e.thumbId || uid();
     if (await putThumb(id, e.thumb)) { e.thumbId = id; moved++; }
@@ -294,7 +294,7 @@ function historyNote(e) {
 }
 
 /* ---------- navegação ---------- */
-const VIEWS = ['compare', 'add', 'history', 'settings'];
+const VIEWS = ['compare', 'add', 'history', 'juros', 'settings'];
 function showView(name) {
   if (!VIEWS.includes(name)) name = 'compare';
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
@@ -302,6 +302,7 @@ function showView(name) {
   if (name === 'compare') renderCompare();
   if (name === 'history') renderHistory();
   if (name === 'add') { renderDatalists(); renderReadMode(); updateLive(); }
+  if (name === 'juros') renderFin();
   if (name === 'settings') renderSettings();
   window.scrollTo({ top: 0 });
 }
@@ -738,6 +739,87 @@ function drawScaled(img, max) {
   return c;
 }
 
+/** Converte para tons de cinza (o OCR lê melhor sem cor). */
+function toGray(canvas) {
+  const ctx = canvas.getContext('2d');
+  const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    p[i] = p[i + 1] = p[i + 2] = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+  }
+  ctx.putImageData(d, 0, 0);
+  return canvas;
+}
+
+/**
+ * Acha a etiqueta na foto: a maior região de papel claro e sem cor que contém
+ * texto escuro. A foto do celular e vertical e a etiqueta e uma faixa estreita,
+ * entao recortar antes de enviar dobra a resolucao do texto pequeno (C/48,
+ * L32P28, 50F, "Preco por MT") -- que e justamente o que sai errado.
+ */
+function findLabel(img) {
+  const S = 12, c = drawScaled(img, 900), ctx = c.getContext('2d');
+  const W = Math.floor(c.width / S), H = Math.floor(c.height / S);
+  if (W < 3 || H < 3) return null;
+  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+  const paper = new Uint8Array(W * H), ink = new Uint8Array(W * H);
+  for (let gy = 0; gy < H; gy++) for (let gx = 0; gx < W; gx++) {
+    let lum = 0, sat = 0, dark = 0, n = 0;
+    for (let y = gy * S; y < gy * S + S; y += 2) for (let x = gx * S; x < gx * S + S; x += 2) {
+      const i = (y * c.width + x) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+      const l = 0.299 * r + 0.587 * g + 0.114 * b;
+      lum += l; sat += Math.max(r, g, b) - Math.min(r, g, b); if (l < 110) dark++; n++;
+    }
+    lum /= n; sat /= n;
+    const inky = dark / n > 0.08 && dark / n < 0.6 && sat < 45;
+    paper[gy * W + gx] = (lum > 150 && sat < 45) || inky ? 1 : 0;
+    ink[gy * W + gx] = inky ? 1 : 0;
+  }
+  const seen = new Uint8Array(W * H);
+  let best = null;
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (!paper[s0] || seen[s0]) continue;
+    const st = [s0]; seen[s0] = 1;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, inkc = 0;
+    while (st.length) {
+      const k = st.pop(), x = k % W, y = (k / W) | 0;
+      inkc += ink[k];
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const nk = ny * W + nx;
+        if (paper[nk] && !seen[nk]) { seen[nk] = 1; st.push(nk); }
+      }
+    }
+    const sc = inkc * Math.min(1, (x1 - x0 + 1) / (y1 - y0 + 1));   // muita "tinta" e mais larga que alta
+    if (!best || sc > best.sc) best = { sc, x0, y0, x1, y1 };
+  }
+  if (!best || !best.sc) return null;
+  const k = img.naturalWidth / c.width;
+  const m = S * k;                                   // uma folga de um bloco em volta
+  const x = Math.max(0, best.x0 * S * k - m);
+  const y = Math.max(0, best.y0 * S * k - m);
+  return {
+    x, y,
+    w: Math.min(img.naturalWidth - x, (best.x1 - best.x0 + 1) * S * k + 2 * m),
+    h: Math.min(img.naturalHeight - y, (best.y1 - best.y0 + 1) * S * k + 2 * m),
+  };
+}
+
+function cropScaled(img, r, targetW) {
+  const s = targetW / r.w, c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(r.w * s));
+  c.height = Math.max(1, Math.round(r.h * s));
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  return c;
+}
+
+/** Fração do quadro ocupada pelo recorte (1 = a foto inteira). */
+const areaRel = (r, img) => (r.w * r.h) / (img.naturalWidth * img.naturalHeight);
+
 function renderThumbs() {
   const saved = editThumb ? thumbs.get(editThumb) : null;
   const list = photos.length ? photos : (saved ? [{ id: '', thumb: saved, status: 'salva' }] : []);
@@ -823,7 +905,10 @@ async function lerComOcr(photo, { motivo = '' } = {}) {
   photo.status = '✓';
   $('#ocr-text').textContent = text || '(nenhum texto encontrado)';
   $('#ocr-raw').hidden = false;
-  const n = applyParsed(parseLabel(text, lines), { keepText: true });
+  const parsed = parseLabel(text, lines);
+  const n = applyParsed(parsed, { keepText: true });
+  $('#ai-notes').hidden = !parsed.note;
+  $('#ai-notes').textContent = parsed.note || '';
   return n;
 }
 
@@ -838,10 +923,26 @@ async function processPhoto(photo) {
       batch.forEach(p => { p.status = '🤖'; });
       renderThumbs();
       setBusy(`IA lendo ${batch.length} foto${batch.length > 1 ? 's' : ''}…`);
-      for (const p of batch) if (!p.b64 && p.img) p.b64 = drawScaled(p.img, 1568).toDataURL('image/jpeg', 0.85).split(',')[1];
+      // Para cada foto manda o RECORTE da etiqueta (o texto pequeno fica com o
+      // dobro da resolucao) e, quando o recorte e mesmo um recorte, tambem a foto
+      // inteira como contexto (embalagem, bandeja de ovos).
+      const jpg = cv => cv.toDataURL('image/jpeg', 0.85).split(',')[1];
+      const imagens = [];
+      let recortou = false;
+      for (const p of batch) {
+        if (!p.img) { if (p.b64) imagens.push(p.b64); continue; }
+        const r = findLabel(p.img);
+        if (r && areaRel(r, p.img) < 0.6) {
+          recortou = true;
+          imagens.push(jpg(cropScaled(p.img, r, 1568)));      // etiqueta de perto
+          imagens.push(jpg(drawScaled(p.img, 1100)));         // foto inteira, contexto
+        } else {
+          imagens.push(jpg(drawScaled(p.img, 1568)));
+        }
+      }
       let data;
       try {
-        data = await readWithClaude(batch.map(p => p.b64));
+        data = await readWithClaude(imagens, { recortou, fotos: batch.length });
       } catch (err) {
         // Plano B: a IA falhou, mas o OCR offline ainda pode preencher alguma coisa.
         console.warn(err);
@@ -902,25 +1003,26 @@ const EXTRACT_SCHEMA = {
     'meters_per_roll', 'qty', 'unit', 'packs', 'count', 'sheets', 'notes'],
 };
 
-const AI_SYSTEM = `You read photos taken inside a Brazilian supermarket so the shopper can compare the real unit price (per metre, kg, litre, 100 sheets or item). All photos in one request show the SAME product: usually the shelf price label, sometimes the package itself (front, back, or an open tray of eggs).
+const AI_SYSTEM = `You read photos taken inside a Brazilian supermarket so the shopper can compare the real unit price (per metre, kg, litre, 100 sheets or item). All photos in one request show the SAME product. You may receive, for each photo, a close-up CROP of the shelf label followed by the whole photo: read prices and fine print from the crop, and use the whole photo for context (the package, a tray of eggs, the shelf).
 
-SHELF LABELS IN BRAZIL OFTEN HAVE TWO COLUMNS:
-- left: product description and the REGULAR price, in large type;
-- right: a dark banner "A partir de 3 UN / a UN sai por:" (or "LEVE 3 PAGUE 2") and the PROMOTIONAL price.
-The promotional price is often printed LARGER than the regular one. Never let the banner text or the promotional column leak into name, price or quantities: "3 UN" there is the minimum purchase, NOT how many items are in the package. On a poster, the banner may sit on its own line with the promotional price just below it.
-Labels also print the unit price in small type ("Preço por MT R$0,06", "Preço por LT R$2,85", "R$ 19,96 o litro"). That is NEVER the price field - but do use it to sanity-check yourself: price divided by the total quantity should land near it. Beware: the store's "UN" sometimes means one roll or one piece inside the package, so treat it as a hint, not as truth.
+HOW A BRAZILIAN SHELF LABEL IS LAID OUT
+- Top left: an abbreviated description in capitals with product, brand and size, e.g. "PAPEL HIG DUETTO FT NEUTRO 20M C/18", "CERV HEINEKEN ULTIMAT S/GLU LT350ML", "TOALHA PAPEL MAXIM STYLUS 50F C/2", "ARROZ URBANO PARBO PC 5KG", "LENCO HIG UMED MILI PRIME C/48 UN".
+- The big number on the LEFT is the regular price.
+- A dark banner on the RIGHT, "A partir de N UN / a UN sai por:", with a second big number below or beside it, is the PROMOTIONAL price: that number is promo_price and N is promo_min_qty. On posters the banner sits on its own line and the promotional price, often printed LARGER than the regular one, comes just below. Never let the banner text leak into name, and never read its "N UN" as how many items are in the package.
+- "Preço por UN / MT / LT / KG R$ x" in small print is the store's own unit price. NEVER use it as price. Use it only to sanity-check yourself: price divided by the total quantity should land near it. Careful: the store's "UN" sometimes means one roll or one piece inside the package, and for a "leve 32 pague 28" pack the store divides by 28, not 32 — so treat it as a hint, not as truth.
+- Common abbreviations: HIG = higiênico, FD = folha dupla, FT = folha tripla, FS = folha simples, C/18 = 18 units or rolls in the pack, L32P28 = leve 32 pague 28 (the pack HAS 32 rolls), 360F / 50F = sheets (folhas), 2P = 2 pieces, LT = lata or litro depending on context, LN = long neck, PET = plastic bottle, FR = frasco, PC = pacote, CX = caixa, GF = garrafa, REF = refil, PARBO = parboilizado, S/GLU = sem glúten, UMED = umedecido, SANIT = sanitária, REFRI = refrigerante, CERV = cerveja, SALG = salgadinho, DET = detergente, AMAC = amaciante, TRAD = tradicional, INT = integral, DESN = desnatado.
 
 Fill every field of the JSON schema:
-- category: "papel" for products on rolls compared per metre (toilet paper, aluminium foil, cling film); "folha" for paper towels and napkins counted in sheets ("50F", "360F", "60 toalhas", "100 folhas") - these are compared per 100 sheets, not per metre; "liquido" when the net content is a volume; "peso" when it is a weight; "unidade" for products compared per item (eggs, diapers, wet wipes, tea bags, batteries, towel sets and anything else sold by the piece).
-- name: short product name as a shopper would say it, in Portuguese with normal capitalisation, expanding shelf-label abbreviations ("PAP HIG MIL FT 20M" -> "Papel higiênico folha tripla 20 m"; "CERV" -> "Cerveja"; "REFRI" -> "Refrigerante"; "LENCO HIG UMED" -> "Lenço umedecido"; "AGUA SANIT" -> "Água sanitária"; "SALG" -> "Salgadinho"; "FD"/"FT" -> "folha dupla"/"folha tripla"). No price or promotion text in the name.
+- category: "papel" for rolls compared per metre (toilet paper, aluminium foil, cling film); "folha" for paper towels, napkins and tissues counted in sheets ("50F", "360F", "60 toalhas") — compared per 100 sheets, not per metre; "liquido" when the net content is a volume; "peso" when it is a weight; "unidade" for anything compared per item (eggs, diapers, wet wipes, batteries, towel sets, pieces).
+- name: short product name as a shopper would say it, in Portuguese with normal capitalisation, expanding the abbreviations above ("PAP HIG MIL FT 20M" -> "Papel higiênico folha tripla 20 m"). No price or promotion text in the name.
 - brand: the brand, or "" if not visible.
-- type: generic product type in Portuguese used to group comparable products. Use the SAME wording for the same kind of product every time, e.g. "Papel higiênico", "Papel toalha", "Ovos", "Arroz", "Café", "Refrigerante", "Cerveja", "Leite", "Água sanitária", "Lenço umedecido". Never answer just "Papel" for toilet paper - two spellings split the ranking and the products stop being compared.
-- price: the REGULAR price in BRL for ONE package as sold (the left column), even when the promotional price is bigger on the label. 0 if no price is visible.
-- promo_price / promo_min_qty: the promotional price per package and the minimum quantity from the banner ("A partir de 3 UN" -> 3; "LEVE 3 PAGUE 2" -> 3). Otherwise 0 and 0.
-- rolls / meters_per_roll: only for "papel". "C/18" or "18 ROLOS" is the number of rolls; "20M" or "30M" is metres per roll. "L32P28" means a pack of 32 rolls sold at the price of 28, so rolls = 32.
-- sheets: only for "folha" - sheets per roll ("50F" -> 50, "360F" -> 360, "60 toalhas" -> 60). Use packs for how many rolls come in the package ("C/2" -> 2). Otherwise 0.
+- type: generic product type in Portuguese used to GROUP comparable products. Use the same wording every time for the same kind of product: "Papel higiênico", "Papel toalha", "Ovos", "Arroz", "Café", "Refrigerante", "Cerveja", "Leite", "Água sanitária", "Água mineral", "Lenço umedecido", "Salgadinho", "Jogo de toalha". Never answer just "Papel" or just "Toalha" — a second spelling splits the ranking and the products stop being compared.
+- price: the REGULAR price in BRL for ONE package as sold (the left column), even when the promotional price is printed bigger. 0 if none is visible.
+- promo_price / promo_min_qty: the promotional price per package and the minimum quantity ("A partir de 3 UN" -> 3; "LEVE 3 PAGUE 2" -> 3). Otherwise 0 and 0.
+- rolls / meters_per_roll: only for "papel". "C/18" or "18 ROLOS" is the number of rolls; "20M"/"30M" is metres per roll. "L32P28" means rolls = 32.
+- sheets: only for "folha" — sheets per roll ("50F" -> 50, "360F" -> 360). Use packs for how many rolls are in the package ("C/2" -> 2). Otherwise 0.
 - qty / unit / packs: net content of ONE item and how many items come in the package ("12x350ml" -> qty 350, unit "ml", packs 12). Single package -> packs 1. For "papel", "folha" and "unidade" use qty 0, unit "".
-- count: only for "unidade" - how many items in the package ("C/48 UN" -> 48, "30 unidades" -> 30, "2P" -> 2 pieces, "dúzia" = 12, "meia dúzia" = 6). If none is printed, count the visible items (e.g. eggs in a tray: rows x columns) and say so in notes. A single item with no count -> 1. Otherwise 0.
+- count: only for "unidade" — how many items in the package ("C/48 UN" -> 48, "30 unidades" -> 30, "2P" -> 2 pieces, "dúzia" = 12, "meia dúzia" = 6). If none is printed, count the visible items (eggs in a tray: rows x columns) and say so in notes. A single item with no count -> 1. Otherwise 0.
 - notes: one short sentence in Portuguese for the shopper about anything uncertain or worth knowing (e.g. "Contei 30 ovos (5 x 6).", "O preço de R$ 2,49 vale só a partir de 2 unidades.", "A etiqueta diz R$ 0,06/m, mas são 32 rolos: o metro sai por R$ 0,052."), or "".
 If a value is unreadable, use 0 or "" instead of guessing.`;
 
@@ -954,12 +1056,13 @@ function aiErrorMessage(err, Anthropic) {
   return msg || 'Falha na leitura por IA.';
 }
 
-async function readWithClaude(images) {
+/** Envia imagens ao Claude e devolve o JSON no formato do schema pedido. */
+async function callClaude(images, system, schema, prompt) {
   const Anthropic = await getAnthropic();
   const client = new Anthropic({ apiKey: getApiKey(), dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 90_000 });
   const content = [
     ...images.map(data => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })),
-    { type: 'text', text: `${images.length} foto(s) do mesmo produto. Extraia os dados.` },
+    { type: 'text', text: prompt },
   ];
   let resp;
   try {
@@ -968,8 +1071,8 @@ async function readWithClaude(images) {
       max_tokens: 4000,
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',                     // se o modelo recusar, a API tenta outro automaticamente
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: EXTRACT_SCHEMA } },
-      system: AI_SYSTEM,
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
+      system,
       messages: [{ role: 'user', content }],
     });
   } catch (err) {
@@ -984,6 +1087,12 @@ async function readWithClaude(images) {
     throw new Error('Resposta da IA incompleta. Tente outra foto.');
   }
 }
+
+const readWithClaude = (images, { recortou = false, fotos = 1 } = {}) =>
+  callClaude(images, AI_SYSTEM, EXTRACT_SCHEMA,
+    `${fotos} foto(s) do mesmo produto` + (recortou
+      ? ', cada uma enviada duas vezes: primeiro um RECORTE aproximado da etiqueta (use-o para ler preços e letra miúda) e depois a foto inteira (use-a para o contexto: embalagem, bandeja, prateleira).'
+      : '.') + ' Extraia os dados.');
 
 /** Converte a resposta da IA para o formato usado pelo formulário. */
 function fromAi(d) {
@@ -1027,19 +1136,6 @@ function getOcrWorker() {
   }
   return ocrWorkerPromise;
 }
-/** Tons de cinza + contraste: melhora o OCR de etiquetas. */
-function preprocess(canvas) {
-  const ctx = canvas.getContext('2d');
-  const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const p = d.data;
-  for (let i = 0; i < p.length; i += 4) {
-    let g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-    g = Math.max(0, Math.min(255, (g - 128) * 1.5 + 128));
-    p[i] = p[i + 1] = p[i + 2] = g;
-  }
-  ctx.putImageData(d, 0, 0);
-  return canvas;
-}
 async function readWithOcr(img) {
   ocrLogger = m => {
     if (m.status === 'recognizing text') { $('#ocr-msg').textContent = 'Lendo texto da foto…'; $('#ocr-progress').value = m.progress; }
@@ -1047,11 +1143,24 @@ async function readWithOcr(img) {
   };
   try {
     const worker = await getOcrWorker();
-    const { data } = await worker.recognize(preprocess(drawScaled(img, 1800)));
-    const lines = (data.lines || []).map(l => ({
-      text: l.text.trim(), conf: l.confidence, h: l.bbox ? l.bbox.y1 - l.bbox.y0 : 0,
-    }));
-    return { text: (data.text || '').trim(), lines };
+    // texto esparso: melhora muito a etiqueta. Se a versao do leitor nao aceitar,
+    // segue sem isso em vez de derrubar a leitura inteira.
+    try { await worker.setParameters?.({ tessedit_pageseg_mode: '11' }); } catch (err) { console.warn(err); }
+    const run = async canvas => {
+      const { data } = await worker.recognize(canvas);
+      const lines = (data.lines || []).map(l => ({
+        text: (l.text || '').trim(), conf: l.confidence, h: l.bbox ? l.bbox.y1 - l.bbox.y0 : 0,
+      })).filter(l => l.text);
+      return { text: (data.text || '').trim(), lines };
+    };
+    const inteira = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
+    const r = findLabel(img);
+    let res = await run(toGray(cropScaled(img, r || inteira, 1800)));
+    if (r && !/\d[,.]\d{2}/.test(res.text)) {                      // o recorte falhou: tenta a foto toda
+      const full = await run(toGray(cropScaled(img, inteira, 1600)));
+      if (/\d[,.]\d{2}/.test(full.text)) res = full;
+    }
+    return res;
   } finally {
     ocrLogger = null;
   }
@@ -1367,6 +1476,22 @@ function parseLabel(raw, lines = []) {
     }
   }
 
+  /* ---------- sem quantidade legível? deduz do "Preço por KG/LT" ---------- */
+  if (mUnit && out.price > 0 && !out.qty && (!out.category || out.category === 'peso' || out.category === 'liquido')) {
+    const unidLabel = (mUnit[1] && !mUnit[1].includes('$') ? mUnit[1] : mUnit[3] || '').toLowerCase().replace(/[^a-zç]/g, '');
+    const valorUnit = num(mUnit[2].includes(',') ? mUnit[2] : mUnit[3]);
+    const cat = { kg: 'peso', quilo: 'peso', l: 'liquido', lt: 'liquido', litro: 'liquido' }[unidLabel];
+    if (cat && valorUnit > 0) {
+      const q = Math.round((out.price / valorUnit) * 20) / 20;     // arredonda para 0,05
+      if (q > 0 && q < 100) {
+        out.category = cat;
+        out.qty = q;
+        out.unit = cat === 'peso' ? 'kg' : 'L';
+        out.note = `Quantidade deduzida do preço por ${cat === 'peso' ? 'quilo' : 'litro'} da etiqueta — confira.`;
+      }
+    }
+  }
+
   /* ---------- tipo, marca e nome ---------- */
   out.type = tipoCanonico((TIPOS.find(([re]) => re.test(flatExp)) || [])[1]);
   if (out.category === 'unidade' && ovos) out.type = 'Ovos';
@@ -1459,6 +1584,327 @@ function applyParsed(p, { keepText = false } = {}) {
   updateLive();
   return count;
 }
+
+/* =========================================================
+   VIEW: PARCELADO × À VISTA (juros reais embutidos)
+   ========================================================= */
+const J = id => document.getElementById('j-' + id);
+const finForm = $('#fin-form');
+let finLast = 'pmt';          // qual campo o usuario digitou por ultimo: parcela ou total
+let finThumb = null;
+
+/**
+ * Taxa mensal efetiva i que iguala o valor das parcelas, trazidas a valor presente,
+ * ao preco a vista menos a entrada. A 1a parcela vence em `days` dias; as demais a cada 30.
+ */
+function impliedRate({ cash, n, pmt, down = 0, days = 30 }) {
+  const pv = cash - down;
+  if (!(pv > 0 && n > 0 && pmt > 0)) return NaN;
+  const t0 = days / 30;
+  const f = i => { let s = 0; for (let k = 0; k < n; k++) s += pmt / (1 + i) ** (t0 + k); return s - pv; };
+  let lo = -0.5, hi = 3;
+  if (f(lo) < 0 || f(hi) > 0) return NaN;
+  for (let it = 0; it < 200; it++) {
+    const mid = (lo + hi) / 2;
+    if (f(mid) > 0) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function readFin() {
+  return {
+    name: J('name').value.trim(),
+    store: J('store').value.trim(),
+    cash: num(J('cash').value),
+    n: Math.round(num(J('n').value)),
+    pmt: num(J('pmt').value),
+    down: num(J('down').value) || 0,
+    days: +J('days').value,
+  };
+}
+
+/** Classifica os juros: verde (sem juros), amarelo (ate 2% a.m.), vermelho (acima). */
+function finAnalysis(f) {
+  if (!(f.n > 0 && f.pmt > 0)) return null;
+  const total = f.down + f.n * f.pmt;
+  if (!(f.cash > 0)) return { total, noCash: true };
+  const extra = total - f.cash;
+  const i = impliedRate(f);
+  const year = (1 + i) ** 12 - 1;
+  const level = !Number.isFinite(i) ? 'mid' : i <= 0.0005 ? 'best' : i <= 0.02 ? 'mid' : 'bad';
+  return { total, extra, extraPct: extra / f.cash, i, year, level };
+}
+const fmtPct = v => `${fmtN(v * 100, 2)}%`;
+
+function renderFinResult() {
+  const out = $('#fin-result');
+  const f = readFin();
+  const a = finAnalysis(f);
+  if (!a) { out.innerHTML = ''; return; }
+  const parcelas = `${f.down > 0 ? `${brl(f.down)} de entrada + ` : ''}${f.n} × ${brl(f.pmt)}`;
+  if (a.noCash) {
+    out.innerHTML = `<div class="result-box mid">
+      <div class="muted small">Total parcelado</div>
+      <div class="big">${brl(a.total)}</div>
+      <div class="note">${parcelas}<br>⚠️ Informe o <b>preço à vista</b> para calcular os juros. Se o anúncio não mostra, pergunte na loja.</div>
+    </div>`;
+    return;
+  }
+  const when = { 0: 'no ato da compra', 30: 'em 30 dias', 45: 'em 45 dias', 60: 'em 60 dias', 90: 'em 90 dias' }[f.days];
+  let head, big;
+  if (a.level === 'best') {
+    head = a.extra < -0.005 ? 'Parcelado custa menos que à vista' : 'Sem juros';
+    big = a.extra < -0.005 ? `${brl(-a.extra)} a menos` : '0% de juros';
+  } else {
+    head = 'Juros reais embutidos';
+    big = `${fmtPct(a.i)} ao mês`;
+  }
+  out.innerHTML = `<div class="result-box ${a.level}">
+    <div class="muted small">${head}</div>
+    <div class="big">${big}</div>
+    <ul class="rows">
+      ${a.level !== 'best' ? `<li><span>Equivale a</span><b>${fmtPct(a.year)} ao ano</b></li>` : ''}
+      <li><span>À vista</span><b>${brl(f.cash)}</b></li>
+      <li><span>Parcelado (${parcelas})</span><b>${brl(a.total)}</b></li>
+      <li><span>${a.extra >= 0 ? 'Você paga a mais' : 'Você paga a menos'}</span><b>${brl(Math.abs(a.extra))} (${a.extra >= 0 ? '+' : '−'}${fmtN(Math.abs(a.extraPct) * 100, 1)}%)</b></li>
+      ${a.extra > 0 ? `<li><span>À vista é mais barato em</span><b>${fmtN((1 - f.cash / a.total) * 100, 1)}% do total</b></li>` : ''}
+    </ul>
+    <div class="foot">1ª parcela ${when}, demais a cada 30 dias. Não inclui IOF, seguros ou tarifas; no crediário, confira o CET no contrato.</div>
+  </div>`;
+}
+
+function syncFinTotals(ev) {
+  const id = ev?.target?.id;
+  if (id === 'j-pmt') finLast = 'pmt';
+  if (id === 'j-total') finLast = 'total';
+  const n = Math.round(num(J('n').value)), down = num(J('down').value) || 0;
+  if (!(n > 0)) return;
+  if (finLast === 'pmt' && id !== 'j-total') {
+    const pmt = num(J('pmt').value);
+    J('total').value = pmt > 0 ? money(down + n * pmt) : '';
+  } else if (finLast === 'total' && id !== 'j-pmt') {
+    const total = num(J('total').value);
+    J('pmt').value = total > down ? money((total - down) / n) : '';
+  }
+}
+
+finForm.addEventListener('input', ev => {
+  const el = ev.target;
+  if (el.matches?.('input, select')) {
+    el.classList.remove('autofilled');
+    if (ev.isTrusted) el.dataset.user = '1';
+  }
+  syncFinTotals(ev);
+  renderFinResult();
+});
+finForm.addEventListener('change', renderFinResult);
+
+function resetFin() {
+  finForm.reset();
+  finLast = 'pmt';
+  finThumb = null;
+  $$('input, select', finForm).forEach(el => { delete el.dataset.user; el.classList.remove('autofilled'); });
+  $('#fin-thumbs').innerHTML = '';
+  $('#fin-notes').hidden = true;
+  renderFinResult();
+}
+$('#btn-fin-clear').addEventListener('click', resetFin);
+
+finForm.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const f = readFin();
+  const a = finAnalysis(f);
+  if (!a) { toast('Informe nº de parcelas e valor da parcela'); return; }
+  const sim = {
+    id: uid(), createdAt: Date.now(), ...f, name: f.name || 'Simulação',
+    cash: f.cash > 0 ? f.cash : null, rate: a.noCash ? null : a.i,
+  };
+  if (finThumb) {
+    const tid = uid();
+    if (await putThumb(tid, finThumb)) sim.thumbId = tid;
+  }
+  state.financings.push(sim);
+  if (!save()) {
+    state.financings = state.financings.filter(x => x !== sim);
+    if (sim.thumbId) await dropThumb(sim.thumbId);
+    toast('Armazenamento cheio! Exporte um backup e limpe o histórico.', 5000);
+    return;
+  }
+  if (f.store) state.lastStore = f.store;
+  save();
+  toast('Simulação salva ✔️');
+  resetFin();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  renderFinList();
+});
+
+function renderFinList() {
+  const list = state.financings.slice().sort((a, b) => b.createdAt - a.createdAt);
+  $('#fin-list').innerHTML = !list.length ? '' : `<div class="card">
+    <h3 style="margin-bottom:8px">Simulações salvas</h3>
+    <ul class="entries">${list.map(s => {
+      const a = finAnalysis({ ...s, cash: s.cash || 0, down: s.down || 0 });
+      const rate = !a || a.noCash ? '<span class="rate mid">sem à vista</span>'
+        : a.level === 'best' ? '<span class="rate best">sem juros</span>'
+        : `<span class="rate ${a.level}">${fmtPct(a.i)} a.m.</span>`;
+      return `<li class="fin-item">
+        <span><b>${esc(s.name)}</b><br><small>${s.store ? esc(s.store) + ' · ' : ''}${fmtDate(s.createdAt)} · ${s.down > 0 ? brl(s.down) + ' + ' : ''}${s.n} × ${brl(s.pmt)}${s.cash ? ` vs ${brl(s.cash)} à vista` : ''}${a && !a.noCash && a.extra > 0 ? ` · +${brl(a.extra)}` : ''}</small></span>
+        <span style="display:flex;gap:8px;align-items:center">${rate}
+          <button type="button" class="icon-btn" data-fin-del="${s.id}" aria-label="Excluir simulação">🗑️</button></span>
+      </li>`;
+    }).join('')}</ul></div>`;
+}
+
+function renderFin() {
+  $('#fin-mode').innerHTML = hasAi()
+    ? '🤖 A IA lê placas, folhetos e etiquetas de parcelamento.'
+    : '🔤 Leitura básica: em anúncios coloridos costuma falhar — digite os valores ou <a href="#settings">ative a IA</a>.';
+  renderFinResult();
+  renderFinList();
+}
+
+/* ---------- leitura do anúncio por foto ---------- */
+const FIN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    product: { type: 'string' },
+    store: { type: 'string' },
+    cash_price: { type: 'number' },
+    installments: { type: 'integer' },
+    installment_value: { type: 'number' },
+    down_payment: { type: 'number' },
+    first_payment_days: { type: 'integer' },
+    notes: { type: 'string' },
+  },
+  required: ['product', 'store', 'cash_price', 'installments', 'installment_value', 'down_payment', 'first_payment_days', 'notes'],
+};
+
+const FIN_SYSTEM = `You read a photo of a Brazilian shop advert, flyer, price tag or banner that offers a product both "à vista" (single payment) and "parcelado" (in instalments), so the shopper can see the real interest hidden in the instalment option.
+
+Fill every field of the JSON schema:
+- product: short product name in Portuguese (e.g. "Conjunto de panelas Tramontina Linz 10 peças", "Botijão de gás vazio").
+- store: shop name if visible, else "".
+- cash_price: the à vista price in BRL (also called "à vista", "no débito", "no Pix", "pagamento único"). 0 if the advert does not show one.
+- installments / installment_value: number of instalments and the value of each one (e.g. "16x R$ 43,90" -> 16 and 43.90; "10X R$ 20,00" -> 10 and 20.00). Prices are often split with small superscript cents ("43 ,90" = 43.90). If only the instalment total is shown ("10x sem juros de R$ 1.999"), installment_value = total / installments.
+- down_payment: an entry payment ("entrada") in BRL, else 0. For "1+9 de R$ 50" use down_payment 50 and installments 9.
+- first_payment_days: days from purchase to the first instalment. Use the advert's wording ("1º pagamento em 60 dias", "só em 60 dias" -> 60). 0 when the first instalment is paid at purchase. If not stated, 30.
+- notes: one short sentence in Portuguese for the shopper about anything uncertain or worth knowing (e.g. "O anúncio não mostra o preço à vista.", "Parcelamento sujeito à análise de crédito."), or "".
+Ignore unrelated badges such as "em até 24x" that do not give an instalment value. If a value is unreadable, use 0 or "" instead of guessing.`;
+
+/** Leitura offline: procura "16x 43,90", "à vista 439,90", "entrada", "60 dias". */
+function parseFinancing(raw) {
+  const U = norm(raw).toUpperCase();
+  const money2 = '(\\d{1,3}(?:\\.\\d{3})*[,.]\\s?\\d{2})';
+  const out = {};
+  const inst = U.match(new RegExp(`\\b(\\d{1,2})\\s*X\\s*(?:DE\\s*)?(?:R\\s?\\$\\s*)?${money2}`));
+  if (inst) { out.n = +inst[1]; out.pmt = num(inst[2]); }
+  // "a vista R$ 599" e tambem "R$ 2.199,00 no Pix" (valor antes da palavra)
+  const aVista = '(?:A\\s*VIS\\s?TA|NO\\s+DEBITO|NO\\s+PIX|NO\\s+DINHEIRO|PAGAMENTO\\s+UNICO)';
+  const cash = U.match(new RegExp(`${aVista}[^0-9]{0,60}?${money2}`))
+    || U.match(new RegExp(`${money2}[^0-9]{0,20}${aVista}`));
+  if (cash) out.cash = num(cash[1]);
+  const plus = U.match(new RegExp(`\\b1\\s*\\+\\s*(\\d{1,2})\\s*(?:X\\s*)?(?:DE\\s*)?(?:R\\s?\\$\\s*)?${money2}`));
+  if (plus) { out.n = +plus[1]; out.pmt = num(plus[2]); out.down = out.pmt; }
+  const down = U.match(new RegExp(`(?<!SEM\\s)ENTRADA[^0-9]{0,15}${money2}`));
+  if (down) out.down = num(down[1]);
+  const days = U.match(/(?:PAGAMENTO|PARCELA|PAGAR|PAGUE)[^0-9]{0,25}(\d{2,3})\s*DIAS/);
+  if (days && +days[1] <= 120) out.days = +days[1];
+  return out;
+}
+
+function applyFin(p) {
+  let count = 0;
+  const set = (id, v, fmt = x => x) => {
+    const el = J(id);
+    if (v == null || v === '' || (typeof v === 'number' && !(v > 0) && id !== 'days')) return;
+    if (el.dataset.user === '1') return;
+    el.value = String(fmt(v));
+    if (el.tagName !== 'SELECT') el.classList.add('autofilled');
+    count++;
+  };
+  set('name', p.name);
+  set('store', p.store);
+  set('cash', p.cash, money);
+  set('n', p.n);
+  set('pmt', p.pmt, money);
+  set('down', p.down, money);
+  if ([0, 30, 45, 60, 90].includes(p.days)) set('days', p.days);
+  finLast = 'pmt';
+  syncFinTotals();
+  renderFinResult();
+  return count;
+}
+
+async function handleFinPhoto(file) {
+  let img;
+  try { img = await loadImage(file); } catch { toast('Não consegui abrir a imagem'); return; }
+  finThumb = drawScaled(img, 200).toDataURL('image/jpeg', 0.55);
+  $('#fin-thumbs').innerHTML = `<div class="thumb"><img src="${finThumb}" alt="Foto do anúncio"></div>`;
+  const st = $('#fin-status');
+  st.hidden = false;
+  $('#fin-notes').hidden = true;
+  try {
+    let n;
+    if (hasAi()) {
+      $('#fin-msg').textContent = 'IA lendo o anúncio…';
+      const d = await callClaude([drawScaled(img, 1568).toDataURL('image/jpeg', 0.85).split(',')[1]],
+        FIN_SYSTEM, FIN_SCHEMA, 'Foto de um anúncio com preço à vista e parcelado. Extraia os dados.');
+      setReadError('');
+      n = applyFin({
+        name: d.product, store: d.store, cash: d.cash_price, n: d.installments,
+        pmt: d.installment_value, down: d.down_payment, days: d.first_payment_days,
+      });
+      if (d.notes) { $('#fin-notes').textContent = '🤖 ' + d.notes; $('#fin-notes').hidden = false; }
+      toast(n ? 'Valores preenchidos — confira os campos em amarelo' : 'Não consegui ler os valores. Digite-os.', 3500);
+      return;
+    }
+    $('#fin-msg').textContent = 'Lendo o texto do anúncio…';
+    const { text } = await readWithOcr(img);
+    const p = parseFinancing(text);
+    n = applyFin(p);
+    // Diz exatamente o que faltou e leva ao primeiro campo vazio
+    const f = readFin();
+    const missing = [
+      !(f.cash > 0) && ['cash', 'preço à vista'],
+      !(f.n > 0) && ['n', 'nº de parcelas'],
+      !(f.pmt > 0) && ['pmt', 'valor da parcela'],
+    ].filter(Boolean);
+    const lines = [];
+    if (missing.length) lines.push(`🔤 Não consegui ler: <b>${missing.map(m => m[1]).join(', ')}</b>. Digite ${missing.length > 1 ? 'esses valores' : 'esse valor'} olhando a foto.`);
+    if (p.days == null) lines.push('📅 Confira quando vence a <b>1ª parcela</b> — alguns anúncios dizem "1º pagamento em 60 dias", e isso muda os juros.');
+    lines.push('Com a <a href="#settings">leitura por IA</a>, o app lê tudo isso sozinho.');
+    $('#fin-notes').innerHTML = lines.join('<br>');
+    $('#fin-notes').hidden = false;
+    if (missing.length) setTimeout(() => J(missing[0][0]).focus(), 300);
+    toast(missing.length ? `Faltou ler: ${missing.map(m => m[1]).join(', ')}` : 'Valores preenchidos — confira os campos em amarelo', 3500);
+  } catch (err) {
+    console.error(err);
+    setReadError(err.message || 'Falha na leitura do anúncio. Digite os valores.');
+    toast('Não consegui ler o anúncio — veja o aviso acima', 4000);
+  } finally {
+    st.hidden = true;
+  }
+}
+for (const id of ['fin-camera', 'fin-gallery']) {
+  document.getElementById(id).addEventListener('change', ev => {
+    const file = ev.target.files[0];
+    ev.target.value = '';
+    if (file) handleFinPhoto(file);
+  });
+}
+
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-fin-del]');
+  if (!b) return;
+  const s = state.financings.find(x => x.id === b.dataset.finDel);
+  if (!s || !confirm(`Excluir a simulação "${s.name}"?`)) return;
+  state.financings = state.financings.filter(x => x !== s);
+  save();
+  if (s.thumbId) dropThumb(s.thumbId);
+  renderFinList();
+  toast('Simulação excluída');
+});
 
 /* =========================================================
    VIEW: CONFIGURAÇÕES (chave da IA)
@@ -1597,7 +2043,7 @@ async function limparHistorico(tudo) {
   if (tudo) {
     const n = state.entries.length;
     if (!confirm(`Apagar TODO o histórico (${n} registro${n === 1 ? '' : 's'}), inclusive a visita atual?\n\nIsso não pode ser desfeito. Exporte um backup antes se quiser guardar.`)) return;
-    state = { entries: [], visits: [], currentVisitId: null, lastStore: state.lastStore };
+    state = { entries: [], visits: [], financings: state.financings, currentVisitId: null, lastStore: state.lastStore };
   } else {
     const n = state.entries.filter(e => e.visitId !== state.currentVisitId).length;
     if (!n) { toast('Não há visitas anteriores para apagar'); return; }
@@ -1613,7 +2059,7 @@ $('#btn-clear-all').addEventListener('click', () => limparHistorico(true));
 $('#btn-export').addEventListener('click', () => {
   // As fotos vivem no IndexedDB; vao junto no backup para ele ser completo.
   const fotos = {};
-  for (const e of state.entries) if (e.thumbId && thumbs.has(e.thumbId)) fotos[e.thumbId] = thumbs.get(e.thumbId);
+  for (const e of [...state.entries, ...state.financings]) if (e.thumbId && thumbs.has(e.thumbId)) fotos[e.thumbId] = thumbs.get(e.thumbId);
   const blob = new Blob([JSON.stringify({ ...state, thumbs: fotos }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1652,6 +2098,8 @@ $('#in-import').addEventListener('change', async ev => {
     const vids = new Set(state.visits.map(v => v.id));
     const novasVisitas = (data.visits || []).filter(v => v && v.id && !vids.has(v.id));
     state.visits.push(...novasVisitas);
+    const fids = new Set(state.financings.map(f => f.id));
+    state.financings.push(...(data.financings || []).filter(f => f && f.id && !fids.has(f.id)));
     const todas = new Set(state.visits.map(v => v.id));
     let avulsa = null;
     for (const e of fresh) {

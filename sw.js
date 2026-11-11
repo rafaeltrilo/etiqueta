@@ -1,6 +1,6 @@
 /* Service worker: funciona offline (app shell) e guarda o OCR baixado da CDN.
    Ao alterar os arquivos do app, mude VERSION para forçar a atualização nos celulares. */
-const VERSION = 'preco-real-v5';
+const VERSION = 'preco-real-v6';
 const SHELL = [
   './',
   'index.html',

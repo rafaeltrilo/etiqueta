@@ -22,7 +22,6 @@
     </div>
     <div class="appbar-actions">
       <button id="btn-install" class="chip chip-solid" hidden>Instalar app</button>
-      <a href="#settings" class="appbar-icon" aria-label="Configurações">⚙️</a>
     </div>
   </header>
 
@@ -187,6 +186,72 @@
       <div id="history-list"></div>
     </section>
 
+    <!-- ============ PARCELADO × À VISTA ============ -->
+    <section id="view-juros" class="view" aria-labelledby="t-juros">
+      <form id="fin-form" class="card form" novalidate autocomplete="off">
+        <div class="form-head">
+          <h2 id="t-juros">Parcelado × à vista</h2>
+          <button type="button" id="btn-fin-clear" class="btn btn-ghost btn-sm">🧹 Limpar</button>
+        </div>
+        <div class="photo-box">
+          <div class="photo-actions">
+            <label class="btn btn-primary btn-photo">
+              <span aria-hidden="true">📷</span> Fotografar anúncio
+              <input type="file" id="fin-camera" accept="image/*" capture="environment" hidden>
+            </label>
+            <label class="btn btn-ghost">
+              🖼️ Galeria
+              <input type="file" id="fin-gallery" accept="image/*" hidden>
+            </label>
+          </div>
+          <div id="fin-thumbs" class="thumbs"></div>
+          <div id="fin-status" class="ocr-status" hidden>
+            <span id="fin-msg">Lendo…</span>
+            <progress max="1"></progress>
+          </div>
+          <p id="fin-notes" class="ai-notes" hidden></p>
+          <p id="fin-mode" class="small read-mode"></p>
+        </div>
+
+        <div class="grid2">
+          <label class="field span2">Produto
+            <input id="j-name" placeholder="Ex.: Conjunto de panelas" enterkeyhint="next">
+          </label>
+          <label class="field">Loja
+            <input id="j-store" list="dl-stores" placeholder="Opcional" enterkeyhint="next">
+          </label>
+          <label class="field">Preço à vista (R$)
+            <input id="j-cash" inputmode="decimal" placeholder="0,00" enterkeyhint="next">
+          </label>
+          <label class="field">Nº de parcelas
+            <input id="j-n" inputmode="numeric" placeholder="Ex.: 10" enterkeyhint="next">
+          </label>
+          <label class="field">Valor da parcela (R$)
+            <input id="j-pmt" inputmode="decimal" placeholder="0,00" enterkeyhint="next">
+          </label>
+          <label class="field">Total parcelado (R$)
+            <input id="j-total" inputmode="decimal" placeholder="calculado" enterkeyhint="next">
+          </label>
+          <label class="field">Entrada (R$)
+            <input id="j-down" inputmode="decimal" placeholder="0,00" enterkeyhint="done">
+          </label>
+          <label class="field span2">1ª parcela vence
+            <select id="j-days">
+              <option value="0">No ato da compra</option>
+              <option value="30" selected>Em 30 dias</option>
+              <option value="45">Em 45 dias</option>
+              <option value="60">Em 60 dias</option>
+              <option value="90">Em 90 dias</option>
+            </select>
+          </label>
+        </div>
+
+        <output id="fin-result" class="live-result" aria-live="polite"></output>
+        <button type="submit" class="btn btn-primary btn-block">Salvar simulação</button>
+      </form>
+      <div id="fin-list"></div>
+    </section>
+
     <!-- ============ CONFIGURAÇÕES ============ -->
     <section id="view-settings" class="view" aria-labelledby="t-settings">
       <div class="card">
@@ -227,6 +292,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>
       <span>Comparar</span>
     </a>
+    <a href="#juros" data-view="juros" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5 5 19" /><circle cx="7" cy="7" r="2.5" /><circle cx="17" cy="17" r="2.5" /></svg>
+      <span>Juros</span>
+    </a>
     <a href="#add" data-view="add" class="tab tab-add">
       <span class="plus" aria-hidden="true">+</span>
       <span>Adicionar</span>
@@ -234,6 +303,10 @@
     <a href="#history" data-view="history" class="tab">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="9" /></svg>
       <span>Histórico</span>
+    </a>
+    <a href="#settings" data-view="settings" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></svg>
+      <span>Ajustes</span>
     </a>
   </nav>
 
